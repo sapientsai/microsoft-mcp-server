@@ -94,6 +94,7 @@ Add to your project's `.mcp.json`:
 ### With Claude Desktop
 
 Add to your Claude Desktop config:
+
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Linux**: `~/.config/claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
@@ -128,14 +129,14 @@ Execute Microsoft Graph API requests.
 
 **Parameters:**
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `path` | Yes | API endpoint path (e.g., `/me`, `/users`, `/me/messages`) |
-| `method` | No | HTTP method: GET, POST, PUT, PATCH, DELETE (default: GET) |
-| `apiVersion` | No | Graph API version: v1.0, beta (default: v1.0) |
-| `apiType` | No | API type: graph, azure (default: graph) |
-| `queryParams` | No | OData query parameters ($select, $filter, $top, etc.) |
-| `body` | No | Request body for POST/PUT/PATCH operations |
+| Parameter     | Required | Description                                               |
+| ------------- | -------- | --------------------------------------------------------- |
+| `path`        | Yes      | API endpoint path (e.g., `/me`, `/users`, `/me/messages`) |
+| `method`      | No       | HTTP method: GET, POST, PUT, PATCH, DELETE (default: GET) |
+| `apiVersion`  | No       | Graph API version: v1.0, beta (default: v1.0)             |
+| `apiType`     | No       | API type: graph, azure (default: graph)                   |
+| `queryParams` | No       | OData query parameters ($select, $filter, $top, etc.)     |
+| `body`        | No       | Request body for POST/PUT/PATCH operations                |
 
 **Example prompts to Claude:**
 
@@ -153,10 +154,10 @@ Check current authentication status. Returns authentication mode, token validity
 
 Manually set an access token for authentication.
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `accessToken` | Yes | Bearer access token |
-| `expiresOn` | No | ISO datetime when token expires (default: 1 hour from now) |
+| Parameter     | Required | Description                                                |
+| ------------- | -------- | ---------------------------------------------------------- |
+| `accessToken` | Yes      | Bearer access token                                        |
+| `expiresOn`   | No       | ISO datetime when token expires (default: 1 hour from now) |
 
 ### `sign_in`
 
