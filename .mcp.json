@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "microsoft-graph": {
+      "command": "node",
+      "args": ["dist/bin.js"],
+      "env": {
+        "AZURE_CLIENT_ID": "${AZURE_CLIENT_ID}",
+        "AZURE_TENANT_ID": "${AZURE_TENANT_ID}",
+        "AUTH_MODE": "device_code"
+      }
+    }
+  }
+}
