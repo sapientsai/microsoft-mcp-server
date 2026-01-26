@@ -44,6 +44,7 @@ src/
 ### Authentication Flow
 
 Three modes supported via `AUTH_MODE` environment variable:
+
 - **device_code**: Interactive browser auth, user signs in via microsoft.com/devicelogin
 - **client_credentials**: App-only auth using client ID + secret (no user context)
 - **client_token**: Manual token injection via env var or `set_access_token` tool
@@ -53,6 +54,7 @@ Three modes supported via `AUTH_MODE` environment variable:
 ### Tool Registration Pattern
 
 Tools are registered via `server.tool()` from `@modelcontextprotocol/sdk`. Each tool:
+
 1. Defines name, description, and Zod schema for parameters
 2. Returns `{ content: [{ type: "text", text: "..." }] }` format
 3. Sets `isError: true` on failures
@@ -60,6 +62,7 @@ Tools are registered via `server.tool()` from `@modelcontextprotocol/sdk`. Each 
 ### Graph Client
 
 `GraphClient` wraps fetch calls with:
+
 - Bearer token injection from AuthManager
 - Base URL construction (Graph vs Azure ARM)
 - API version handling (v1.0 or beta)
@@ -68,6 +71,7 @@ Tools are registered via `server.tool()` from `@modelcontextprotocol/sdk`. Each 
 ## Configuration
 
 Required environment variables (see `.env.example`):
+
 - `AZURE_CLIENT_ID` - Azure app registration client ID
 - `AZURE_TENANT_ID` - Tenant ID (default: "common")
 - `AUTH_MODE` - Authentication mode
@@ -77,6 +81,7 @@ Required environment variables (see `.env.example`):
 ## Build System
 
 Uses `ts-builds` toolchain with `tsdown` bundler. Configuration extends shared configs:
+
 - `tsconfig.json` extends `ts-builds/tsconfig`
 - `tsdown.config.ts` imports from `ts-builds/tsdown`
 - Prettier uses `ts-builds/prettier`
