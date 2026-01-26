@@ -4,94 +4,81 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a TypeScript library template designed to be cloned/forked for creating new npm packages. It uses the `ts-builds` toolchain for standardized build scripts and dual module format support (CommonJS + ES modules).
-
-**Template Usage**: See STANDARDIZATION_GUIDE.md for applying this pattern to other TypeScript projects.
+Microsoft Graph MCP Server - A Model Context Protocol server that provides AI assistants access to Microsoft Graph API for Microsoft 365 services (users, mail, calendar, files, etc.).
 
 ## Development Commands
-
-All commands delegate to `ts-builds` for consistency across projects:
 
 ```bash
 pnpm validate        # Main command: format + lint + test + build (use before commits)
 
-pnpm format          # Format code with Prettier
-pnpm format:check    # Check formatting only
-
-pnpm lint            # Fix ESLint issues
-pnpm lint:check      # Check ESLint issues only
-
 pnpm test            # Run tests once
-pnpm test:watch      # Run tests in watch mode
-pnpm test:coverage   # Run tests with coverage
-
-pnpm build           # Production build (outputs to dist/)
-pnpm dev             # Development build with watch mode
-
-pnpm typecheck       # Check TypeScript types
-```
-
-### Running a Single Test
-
-```bash
 pnpm test -- --testNamePattern="pattern"    # Filter by test name
 pnpm test -- test/specific.spec.ts          # Run specific file
+
+pnpm build           # Production build
+pnpm dev             # Development build with watch mode
+pnpm start           # Run the server (requires build first)
+pnpm inspect         # Test with MCP Inspector
 ```
 
 ## Architecture
 
-### Build System: ts-builds + tsdown
+### MCP Server Structure
 
-- **ts-builds**: Centralized toolchain package providing all build scripts
-- **tsdown**: Underlying bundler (successor to tsup) configured via `ts-builds/tsdown`
-- **Configuration**: `tsdown.config.ts` imports default config from ts-builds
-- **TypeScript**: `tsconfig.json` extends `ts-builds/tsconfig`
-- **Prettier**: Uses `ts-builds/prettier` shared config
-
-### Output Format
-
-- **dist/**: Production builds containing:
-  - `index.cjs` - CommonJS format
-  - `index.mjs` - ES modules format
-  - `index.d.mts` - TypeScript declarations
-- **lib/**: Development builds (also published)
-
-### Package Exports
-
-```json
-{
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.mjs",
-  "types": "./dist/index.d.mts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.mts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs"
-    }
-  }
-}
+```
+src/
+├── index.ts          # Server factory, config loader, exports
+├── bin.ts            # CLI entry point (shebang, dotenv, runServer)
+├── types.ts          # TypeScript types and constants
+├── auth/             # Authentication module
+│   ├── auth-manager.ts      # Coordinates auth modes, token management
+│   ├── device-code.ts       # MSAL device code flow (interactive)
+│   └── client-credentials.ts # MSAL client credentials (app-only)
+├── client/
+│   └── graph-client.ts      # HTTP client wrapper for Graph API
+└── tools/            # MCP tool definitions
+    ├── graph-tools.ts       # microsoft_graph tool
+    └── auth-tools.ts        # get_auth_status, set_access_token, sign_in, sign_out
 ```
 
-### Testing: Vitest
+### Authentication Flow
 
-- Tests located in `test/*.spec.ts`
-- Uses Vitest with configuration from ts-builds
-- Coverage via v8 provider
+Three modes supported via `AUTH_MODE` environment variable:
+- **device_code**: Interactive browser auth, user signs in via microsoft.com/devicelogin
+- **client_credentials**: App-only auth using client ID + secret (no user context)
+- **client_token**: Manual token injection via env var or `set_access_token` tool
 
-## Key Files
+`AuthManager` coordinates mode switching and token lifecycle. Device code and client credentials use `@azure/msal-node` for token acquisition.
 
-- `src/index.ts` - Main library entry point
-- `test/*.spec.ts` - Test files
-- `tsdown.config.ts` - Build config (imports from ts-builds)
-- `tsconfig.json` - TypeScript config (extends ts-builds)
-- `.claude/skills/typescript-standards/` - Claude Code skill for applying these standards
+### Tool Registration Pattern
 
-## Publishing
+Tools are registered via `server.tool()` from `@modelcontextprotocol/sdk`. Each tool:
+1. Defines name, description, and Zod schema for parameters
+2. Returns `{ content: [{ type: "text", text: "..." }] }` format
+3. Sets `isError: true` on failures
 
-```bash
-npm version patch|minor|major
-npm publish --access public
-```
+### Graph Client
 
-The `prepublishOnly` hook automatically runs `pnpm validate` before publishing.
+`GraphClient` wraps fetch calls with:
+- Bearer token injection from AuthManager
+- Base URL construction (Graph vs Azure ARM)
+- API version handling (v1.0 or beta)
+- OData query parameter serialization
+
+## Configuration
+
+Required environment variables (see `.env.example`):
+- `AZURE_CLIENT_ID` - Azure app registration client ID
+- `AZURE_TENANT_ID` - Tenant ID (default: "common")
+- `AUTH_MODE` - Authentication mode
+- `AZURE_CLIENT_SECRET` - Required for client_credentials mode
+- `ACCESS_TOKEN` - Pre-obtained token for client_token mode
+
+## Build System
+
+Uses `ts-builds` toolchain with `tsdown` bundler. Configuration extends shared configs:
+- `tsconfig.json` extends `ts-builds/tsconfig`
+- `tsdown.config.ts` imports from `ts-builds/tsdown`
+- Prettier uses `ts-builds/prettier`
+
+Output: ES modules in `dist/` with TypeScript declarations.
