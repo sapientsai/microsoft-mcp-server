@@ -24,7 +24,7 @@ pnpm add microsoft-mcp-server
 
 ### Azure App Registration
 
-1. Go to [Azure Portal](https://portal.azure.com) > Azure Active Directory > App registrations
+1. Go to [Azure Portal](https://portal.azure.com) > Microsoft Entra ID > App registrations
 2. Click "New registration"
 3. Name your app (e.g., "MCP Graph Server")
 4. Select "Accounts in any organizational directory and personal Microsoft accounts"
@@ -71,9 +71,32 @@ GRAPH_SCOPES=User.Read,Mail.Read,Calendars.Read
 
 ## Usage
 
+### With Claude Code CLI
+
+Add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "microsoft-graph": {
+      "command": "npx",
+      "args": ["microsoft-mcp-server"],
+      "env": {
+        "AZURE_CLIENT_ID": "your-client-id",
+        "AZURE_TENANT_ID": "common",
+        "AUTH_MODE": "device_code"
+      }
+    }
+  }
+}
+```
+
 ### With Claude Desktop
 
-Add to your Claude Desktop config (`~/.config/claude/claude_desktop_config.json`):
+Add to your Claude Desktop config:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux**: `~/.config/claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -94,11 +117,7 @@ Add to your Claude Desktop config (`~/.config/claude/claude_desktop_config.json`
 ### Standalone
 
 ```bash
-# Run the server
 npx microsoft-mcp-server
-
-# Or if installed globally
-microsoft-mcp-server
 ```
 
 ## Available Tools
@@ -109,51 +128,35 @@ Execute Microsoft Graph API requests.
 
 **Parameters:**
 
-- `path` (required): API endpoint path (e.g., `/me`, `/users`, `/me/messages`)
-- `method`: HTTP method (GET, POST, PUT, PATCH, DELETE) - default: GET
-- `apiVersion`: Graph API version (v1.0, beta) - default: v1.0
-- `apiType`: API type (graph, azure) - default: graph
-- `queryParams`: OData query parameters ($select, $filter, $top, etc.)
-- `body`: Request body for POST/PUT/PATCH operations
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `path` | Yes | API endpoint path (e.g., `/me`, `/users`, `/me/messages`) |
+| `method` | No | HTTP method: GET, POST, PUT, PATCH, DELETE (default: GET) |
+| `apiVersion` | No | Graph API version: v1.0, beta (default: v1.0) |
+| `apiType` | No | API type: graph, azure (default: graph) |
+| `queryParams` | No | OData query parameters ($select, $filter, $top, etc.) |
+| `body` | No | Request body for POST/PUT/PATCH operations |
 
-**Examples:**
+**Example prompts to Claude:**
 
-```
-# Get current user
-microsoft_graph(path="/me")
-
-# Get user's emails with filtering
-microsoft_graph(
-  path="/me/messages",
-  queryParams={"$select": "subject,from,receivedDateTime", "$top": "10"}
-)
-
-# Create a calendar event
-microsoft_graph(
-  path="/me/events",
-  method="POST",
-  body={
-    "subject": "Team Meeting",
-    "start": {"dateTime": "2024-01-15T10:00:00", "timeZone": "UTC"},
-    "end": {"dateTime": "2024-01-15T11:00:00", "timeZone": "UTC"}
-  }
-)
-```
+- "Get my profile information from Microsoft Graph"
+- "Show me my last 10 emails"
+- "List all users in my organization"
+- "Create a calendar event for tomorrow at 2pm titled 'Team Sync'"
+- "Search for files containing 'budget' in my OneDrive"
 
 ### `get_auth_status`
 
-Check current authentication status.
-
-**Returns:** Authentication mode, token validity, scopes, and account info.
+Check current authentication status. Returns authentication mode, token validity, scopes, and account info.
 
 ### `set_access_token`
 
 Manually set an access token for authentication.
 
-**Parameters:**
-
-- `accessToken` (required): Bearer access token
-- `expiresOn`: ISO datetime when token expires (default: 1 hour from now)
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `accessToken` | Yes | Bearer access token |
+| `expiresOn` | No | ISO datetime when token expires (default: 1 hour from now) |
 
 ### `sign_in`
 
@@ -168,7 +171,7 @@ Clear all cached authentication tokens.
 ### Device Code Flow (Recommended for Interactive Use)
 
 1. Set `AUTH_MODE=device_code`
-2. Call the `sign_in` tool
+2. Ask Claude to sign in (triggers `sign_in` tool)
 3. Visit the displayed URL and enter the code
 4. Complete authentication in browser
 5. Token is cached for subsequent requests
@@ -183,29 +186,18 @@ Clear all cached authentication tokens.
 ### Client Token (Manual)
 
 1. Set `AUTH_MODE=client_token`
-2. Either set `ACCESS_TOKEN` env var or use `set_access_token` tool
+2. Either set `ACCESS_TOKEN` env var or ask Claude to set a token
 3. Useful for testing or when tokens are obtained externally
 
 ## Development
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Development with watch
-pnpm dev
-
-# Run tests
-pnpm test
-
-# Build for production
-pnpm build
-
-# Validate (format + lint + test + build)
-pnpm validate
-
-# Test with MCP Inspector
-pnpm inspect
+pnpm install          # Install dependencies
+pnpm dev              # Development with watch
+pnpm test             # Run tests
+pnpm build            # Build for production
+pnpm validate         # Format + lint + test + build
+pnpm inspect          # Test with MCP Inspector
 ```
 
 ## License
