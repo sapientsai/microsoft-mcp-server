@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output (we rebuild in container)
+dist/
+
+# Environment files (secrets)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Test and dev files
+test/
+*.spec.ts
+coverage/
+.nyc_output/
+
+# Docs
+*.md
+!README.md
+
+# Claude
+.claude/
+.claude-plugin/
+.mcp.json*
+
+# OS
+.DS_Store
+Thumbs.db
