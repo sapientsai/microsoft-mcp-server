@@ -2,15 +2,15 @@
 
 A Model Context Protocol (MCP) server that provides access to Microsoft Graph API, enabling AI assistants to interact with Microsoft 365 services including users, mail, calendar, files, and more.
 
+Built with [FastMCP](https://github.com/punkpeye/fastmcp) for seamless OAuth authentication.
+
 ## Features
 
 - **Microsoft Graph API Access**: Execute any Graph API endpoint through a unified tool
-- **Multiple Authentication Modes**:
-  - **Device Code Flow**: Interactive browser-based authentication
-  - **Client Credentials**: App-only authentication with client secret
-  - **Client Token**: Manual token injection for flexibility
+- **Azure OAuth Authentication**: Automatic OAuth 2.0 flow handled by MCP client (Claude Desktop)
 - **Full API Coverage**: Access Graph API v1.0 and beta endpoints
 - **Azure Management API**: Optional support for Azure Resource Manager API
+- **HTTP & stdio transports**: Run as HTTP server or stdio-based MCP
 
 ## Installation
 
@@ -20,78 +20,47 @@ npm install microsoft-mcp-server
 pnpm add microsoft-mcp-server
 ```
 
-## Prerequisites
+## Quick Start
 
-### Azure App Registration
+### 1. Create Azure App Registration
 
-1. Go to [Azure Portal](https://portal.azure.com) > Microsoft Entra ID > App registrations
-2. Click "New registration"
-3. Name your app (e.g., "MCP Graph Server")
-4. Select "Accounts in any organizational directory and personal Microsoft accounts"
-5. Set Redirect URI to `https://login.microsoftonline.com/common/oauth2/nativeclient` (for device code flow)
-6. Click "Register"
+1. Go to [Azure Portal](https://portal.azure.com) → Azure Active Directory → App registrations
+2. Create a new registration
+3. Add redirect URI: `http://localhost:8080/oauth/callback`
+4. Create a client secret
+5. Grant API permissions for Microsoft Graph (e.g., User.Read, Mail.Read)
 
-### Configure API Permissions
+### 2. Configure Environment
 
-1. In your app registration, go to "API permissions"
-2. Click "Add a permission" > "Microsoft Graph"
-3. Add the permissions you need:
-   - **Delegated** (for device_code): User.Read, Mail.Read, Calendars.Read, etc.
-   - **Application** (for client_credentials): User.Read.All, Mail.Read, etc.
-4. Grant admin consent if required
-
-### Enable Public Client (for Device Code Flow)
-
-1. Go to "Authentication"
-2. Under "Advanced settings", set "Allow public client flows" to "Yes"
-3. Save
-
-## Configuration
-
-Create a `.env` file or set environment variables:
+Create a `.env` file:
 
 ```bash
-# Required: Azure App Registration
 AZURE_CLIENT_ID=your-client-id
+AZURE_CLIENT_SECRET=your-client-secret
 AZURE_TENANT_ID=common  # or specific tenant ID
 
-# Authentication Mode (default: device_code)
-AUTH_MODE=device_code  # device_code | client_credentials | client_token
+# Server Configuration
+BASE_URL=http://localhost:8080
+PORT=8080
 
-# For client_credentials mode
-AZURE_CLIENT_SECRET=your-client-secret
+# Transport: httpStream (default) or stdio
+TRANSPORT_TYPE=httpStream
 
-# For client_token mode
-ACCESS_TOKEN=your-access-token
-
-# Optional: Graph API Configuration
-GRAPH_API_VERSION=v1.0  # v1.0 | beta
-GRAPH_SCOPES=User.Read,Mail.Read,Calendars.Read
+# Optional: Custom scopes
+# GRAPH_SCOPES=openid,profile,email,User.Read,Mail.Read
 ```
+
+### 3. Run the Server
+
+```bash
+npx microsoft-mcp-server
+```
+
+The server starts on `http://localhost:8080` with OAuth endpoint at `/oauth/callback`.
 
 ## Usage
 
-### With Claude Code CLI
-
-Add to your project's `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "microsoft-graph": {
-      "command": "npx",
-      "args": ["microsoft-mcp-server"],
-      "env": {
-        "AZURE_CLIENT_ID": "your-client-id",
-        "AZURE_TENANT_ID": "common",
-        "AUTH_MODE": "device_code"
-      }
-    }
-  }
-}
-```
-
-### With Claude Desktop
+### With Claude Desktop (HTTP Mode)
 
 Add to your Claude Desktop config:
 
@@ -103,22 +72,30 @@ Add to your Claude Desktop config:
 {
   "mcpServers": {
     "microsoft-graph": {
-      "command": "npx",
-      "args": ["microsoft-mcp-server"],
-      "env": {
-        "AZURE_CLIENT_ID": "your-client-id",
-        "AZURE_TENANT_ID": "common",
-        "AUTH_MODE": "device_code"
-      }
+      "url": "http://localhost:8080/mcp"
     }
   }
 }
 ```
 
-### Standalone
+### With Claude Code CLI (stdio Mode)
 
-```bash
-npx microsoft-mcp-server
+Add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "microsoft-graph": {
+      "command": "npx",
+      "args": ["microsoft-mcp-server"],
+      "env": {
+        "TRANSPORT_TYPE": "stdio",
+        "AZURE_CLIENT_ID": "your-client-id",
+        "AZURE_CLIENT_SECRET": "your-client-secret"
+      }
+    }
+  }
+}
 ```
 
 ## Available Tools
@@ -148,47 +125,26 @@ Execute Microsoft Graph API requests.
 
 ### `get_auth_status`
 
-Check current authentication status. Returns authentication mode, token validity, scopes, and account info.
+Check current authentication status. Returns authentication status, scopes, and user principal name.
 
-### `set_access_token`
+## Authentication
 
-Manually set an access token for authentication.
+Authentication is handled automatically by the MCP client (Claude Desktop) via OAuth 2.0:
 
-| Parameter     | Required | Description                                                |
-| ------------- | -------- | ---------------------------------------------------------- |
-| `accessToken` | Yes      | Bearer access token                                        |
-| `expiresOn`   | No       | ISO datetime when token expires (default: 1 hour from now) |
+1. When you first use the `microsoft_graph` tool, Claude Desktop will prompt for authentication
+2. You'll be redirected to Microsoft's login page
+3. After successful login, the token is managed by FastMCP
+4. Subsequent requests use the cached token automatically
 
-### `sign_in`
+### Required Azure App Permissions
 
-Initiate device code authentication flow. Displays a code and URL for browser sign-in.
+For delegated (user) access, add these Microsoft Graph API permissions:
 
-### `sign_out`
-
-Clear all cached authentication tokens.
-
-## Authentication Modes
-
-### Device Code Flow (Recommended for Interactive Use)
-
-1. Set `AUTH_MODE=device_code`
-2. Ask Claude to sign in (triggers `sign_in` tool)
-3. Visit the displayed URL and enter the code
-4. Complete authentication in browser
-5. Token is cached for subsequent requests
-
-### Client Credentials (App-Only)
-
-1. Set `AUTH_MODE=client_credentials`
-2. Set `AZURE_CLIENT_SECRET`
-3. Requires application permissions (not delegated)
-4. No user interaction required
-
-### Client Token (Manual)
-
-1. Set `AUTH_MODE=client_token`
-2. Either set `ACCESS_TOKEN` env var or ask Claude to set a token
-3. Useful for testing or when tokens are obtained externally
+- `User.Read` - Read user profile
+- `Mail.Read` - Read user mail (optional)
+- `Calendars.Read` - Read user calendars (optional)
+- `Files.Read` - Read user files (optional)
+- `Sites.Read.All` - Read SharePoint sites (optional)
 
 ## Development
 
@@ -198,8 +154,16 @@ pnpm dev              # Development with watch
 pnpm test             # Run tests
 pnpm build            # Build for production
 pnpm validate         # Format + lint + test + build
-pnpm inspect          # Test with MCP Inspector
 ```
+
+## Architecture
+
+This server is built with [FastMCP](https://github.com/punkpeye/fastmcp), which provides:
+
+- Automatic OAuth 2.0 flow with Azure AD
+- HTTP streaming and SSE transport support
+- Session management
+- Health check endpoints
 
 ## License
 

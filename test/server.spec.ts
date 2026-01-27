@@ -1,5 +1,6 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
-import { createServerConfig, createServer } from "../src/index.js"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+import { createConfig, createServer, DEFAULT_CLIENT_ID } from "../src/index.js"
 
 describe("Server Configuration", () => {
   const originalEnv = process.env
@@ -13,67 +14,61 @@ describe("Server Configuration", () => {
     process.env = originalEnv
   })
 
-  describe("createServerConfig", () => {
-    it("should throw if no client ID or access token", () => {
-      delete process.env.AZURE_CLIENT_ID
-      delete process.env.ACCESS_TOKEN
-
-      expect(() => createServerConfig()).toThrow("AZURE_CLIENT_ID or ACCESS_TOKEN environment variable is required")
-    })
-
-    it("should default to device_code mode", () => {
-      process.env.AZURE_CLIENT_ID = "test-client-id"
-      delete process.env.AUTH_MODE
-      delete process.env.ACCESS_TOKEN
-
-      const config = createServerConfig()
-      expect(config.authMode).toBe("device_code")
-    })
-
-    it("should use client_token mode when ACCESS_TOKEN is set", () => {
-      process.env.ACCESS_TOKEN = "test-token"
+  describe("createConfig", () => {
+    it("should use default client ID when not provided", () => {
       delete process.env.AZURE_CLIENT_ID
 
-      const config = createServerConfig()
-      expect(config.authMode).toBe("client_token")
+      const config = createConfig()
+      expect(config.clientId).toBe(DEFAULT_CLIENT_ID)
     })
 
-    it("should throw if client_credentials mode without secret", () => {
+    it("should use provided client ID", () => {
       process.env.AZURE_CLIENT_ID = "test-client-id"
-      process.env.AUTH_MODE = "client_credentials"
-      delete process.env.AZURE_CLIENT_SECRET
 
-      expect(() => createServerConfig()).toThrow("AZURE_CLIENT_SECRET is required for client_credentials mode")
-    })
-
-    it("should parse custom scopes", () => {
-      process.env.AZURE_CLIENT_ID = "test-client-id"
-      process.env.GRAPH_SCOPES = "User.Read,Mail.Send,Calendars.ReadWrite"
-
-      const config = createServerConfig()
-      expect(config.scopes).toEqual(["User.Read", "Mail.Send", "Calendars.ReadWrite"])
+      const config = createConfig()
+      expect(config.clientId).toBe("test-client-id")
     })
 
     it("should use default tenant ID", () => {
-      process.env.AZURE_CLIENT_ID = "test-client-id"
       delete process.env.AZURE_TENANT_ID
 
-      const config = createServerConfig()
+      const config = createConfig()
       expect(config.tenantId).toBe("common")
+    })
+
+    it("should use default port", () => {
+      delete process.env.PORT
+
+      const config = createConfig()
+      expect(config.port).toBe(8080)
+    })
+
+    it("should parse custom port", () => {
+      process.env.PORT = "3000"
+
+      const config = createConfig()
+      expect(config.port).toBe(3000)
+    })
+
+    it("should parse custom scopes", () => {
+      process.env.GRAPH_SCOPES = "User.Read,Mail.Send,Calendars.ReadWrite"
+
+      const config = createConfig()
+      expect(config.scopes).toEqual(["User.Read", "Mail.Send", "Calendars.ReadWrite"])
+    })
+
+    it("should use default base URL", () => {
+      delete process.env.BASE_URL
+
+      const config = createConfig()
+      expect(config.baseUrl).toBe("http://localhost:8080")
     })
   })
 
   describe("createServer", () => {
     it("should create server with valid config", () => {
-      const config = {
-        clientId: "test-client-id",
-        tenantId: "test-tenant-id",
-        authMode: "client_token" as const,
-        graphApiVersion: "v1.0" as const,
-        scopes: ["User.Read"],
-      }
-
-      const server = createServer(config)
+      const config = createConfig()
+      const { server } = createServer(config)
       expect(server).toBeDefined()
     })
   })

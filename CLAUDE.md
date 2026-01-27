@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Microsoft Graph MCP Server - A Model Context Protocol server that provides AI assistants access to Microsoft Graph API for Microsoft 365 services (users, mail, calendar, files, etc.).
+Microsoft Graph MCP Server - A Model Context Protocol server built with FastMCP that provides AI assistants access to Microsoft Graph API for Microsoft 365 services (users, mail, calendar, files, etc.).
 
 ## Development Commands
 
@@ -18,65 +18,50 @@ pnpm test -- test/specific.spec.ts          # Run specific file
 pnpm build           # Production build
 pnpm dev             # Development build with watch mode
 pnpm start           # Run the server (requires build first)
-pnpm inspect         # Test with MCP Inspector
 ```
 
 ## Architecture
 
-### MCP Server Structure
+Built with [FastMCP](https://github.com/punkpeye/fastmcp) - a TypeScript framework for MCP servers.
 
 ```
 src/
-├── index.ts          # Server factory, config loader, exports
-├── bin.ts            # CLI entry point (shebang, dotenv, runServer)
-├── types.ts          # TypeScript types and constants
-├── auth/             # Authentication module
-│   ├── auth-manager.ts      # Coordinates auth modes, token management
-│   ├── device-code.ts       # MSAL device code flow (interactive)
-│   └── client-credentials.ts # MSAL client credentials (app-only)
-├── client/
-│   └── graph-client.ts      # HTTP client wrapper for Graph API
-└── tools/            # MCP tool definitions
-    ├── graph-tools.ts       # microsoft_graph tool
-    └── auth-tools.ts        # get_auth_status, set_access_token, sign_in, sign_out
+├── index.ts          # Server factory, config, tools, exports
+└── bin.ts            # CLI entry point (shebang, dotenv, runServer)
 ```
+
+### Key Components
+
+- **FastMCP**: Server framework handling MCP protocol, sessions, transport
+- **AzureProvider**: OAuth 2.0 authentication with Azure AD/Entra ID
+- **Tools**: `microsoft_graph` (Graph API calls) and `get_auth_status` (check auth)
 
 ### Authentication Flow
 
-Three modes supported via `AUTH_MODE` environment variable:
+OAuth 2.0 handled by FastMCP's AzureProvider:
 
-- **device_code**: Interactive browser auth, user signs in via microsoft.com/devicelogin
-- **client_credentials**: App-only auth using client ID + secret (no user context)
-- **client_token**: Manual token injection via env var or `set_access_token` tool
+1. MCP client (Claude Desktop) initiates OAuth when tool requires auth
+2. User redirected to Microsoft login
+3. Callback to `{BASE_URL}/oauth/callback`
+4. Token stored in session, passed to tools via `session.accessToken`
 
-`AuthManager` coordinates mode switching and token lifecycle. Device code and client credentials use `@azure/msal-node` for token acquisition.
+### Transport Modes
 
-### Tool Registration Pattern
-
-Tools are registered via `server.tool()` from `@modelcontextprotocol/sdk`. Each tool:
-
-1. Defines name, description, and Zod schema for parameters
-2. Returns `{ content: [{ type: "text", text: "..." }] }` format
-3. Sets `isError: true` on failures
-
-### Graph Client
-
-`GraphClient` wraps fetch calls with:
-
-- Bearer token injection from AuthManager
-- Base URL construction (Graph vs Azure ARM)
-- API version handling (v1.0 or beta)
-- OData query parameter serialization
+- **httpStream** (default): HTTP server with `/mcp` endpoint and `/oauth/callback`
+- **stdio**: For Claude Code CLI integration
 
 ## Configuration
 
-Required environment variables (see `.env.example`):
+Required environment variables:
 
-- `AZURE_CLIENT_ID` - Azure app registration client ID
-- `AZURE_TENANT_ID` - Tenant ID (default: "common")
-- `AUTH_MODE` - Authentication mode
-- `AZURE_CLIENT_SECRET` - Required for client_credentials mode
-- `ACCESS_TOKEN` - Pre-obtained token for client_token mode
+```bash
+AZURE_CLIENT_ID=...      # Azure app registration client ID
+AZURE_CLIENT_SECRET=...  # Azure app client secret
+AZURE_TENANT_ID=common   # Tenant ID (default: "common" for multi-tenant)
+BASE_URL=http://localhost:8080  # Server URL (for OAuth callback)
+PORT=8080                # Server port
+TRANSPORT_TYPE=httpStream  # httpStream or stdio
+```
 
 ## Build System
 

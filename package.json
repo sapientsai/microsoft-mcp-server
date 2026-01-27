@@ -32,13 +32,12 @@
     "build": "ts-builds build",
     "dev": "ts-builds dev",
     "start": "node dist/bin.js",
-    "inspect": "npx @anthropic-ai/mcp-inspector node dist/bin.js",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/bin.js",
     "prepublishOnly": "pnpm validate"
   },
   "dependencies": {
-    "@azure/msal-node": "^5.0.2",
-    "@modelcontextprotocol/sdk": "^1.25.3",
     "dotenv": "^17.2.3",
+    "fastmcp": "^3.30.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
