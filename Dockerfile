@@ -1,0 +1,48 @@
+# Build stage
+FROM node:22-alpine AS builder
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@10.28.2 --activate
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json pnpm-lock.yaml ./
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy source
+COPY . .
+
+# Build
+RUN pnpm build
+
+# Production stage
+FROM node:22-alpine AS production
+
+# Install pnpm for production deps
+RUN corepack enable && corepack prepare pnpm@10.28.2 --activate
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json pnpm-lock.yaml ./
+
+# Install production dependencies only
+RUN pnpm install --frozen-lockfile --prod
+
+# Copy built files from builder
+COPY --from=builder /app/dist ./dist
+
+# Set environment defaults
+ENV PORT=8080
+ENV TRANSPORT_TYPE=httpStream
+
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/health || exit 1
+
+CMD ["node", "dist/bin.js"]
