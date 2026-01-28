@@ -1,22 +1,44 @@
 import type { AzureSession, OAuthSession } from "fastmcp"
-import { AzureProvider, FastMCP, getAuthSession } from "fastmcp"
+import { AzureProvider, FastMCP } from "fastmcp"
 import { z } from "zod"
+
+import type { TokenManager } from "./auth/token-manager.js"
+import { createTokenManager } from "./auth/token-manager.js"
+import type { AuthMode, ServerConfig } from "./auth/types.js"
+
+export type { TokenManager } from "./auth/token-manager.js"
+export { createTokenManager } from "./auth/token-manager.js"
+export type { AuthMode, ServerConfig } from "./auth/types.js"
 
 export const DEFAULT_CLIENT_ID = "cf7d1f97-781e-4034-930c-abd420e12d49"
 export const GRAPH_BASE_URL = "https://graph.microsoft.com"
 export const AZURE_BASE_URL = "https://management.azure.com"
 
-export type ServerConfig = {
-  clientId: string
-  clientSecret: string
-  tenantId: string
-  baseUrl: string
-  port: number
-  scopes: string[]
+function parseAuthMode(value: string | undefined): AuthMode {
+  if (!value || value === "interactive") {
+    return "interactive"
+  }
+  if (value === "clientCredentials") {
+    return "clientCredentials"
+  }
+  throw new Error(`Invalid AZURE_AUTH_MODE: "${value}". Must be "interactive" or "clientCredentials".`)
+}
+
+function validateConfig(config: ServerConfig): void {
+  if (config.authMode === "clientCredentials") {
+    if (config.tenantId === "common") {
+      throw new Error('Client credentials auth requires a specific tenant ID, not "common".')
+    }
+    if (!config.clientSecret) {
+      throw new Error("Client credentials auth requires AZURE_CLIENT_SECRET.")
+    }
+  }
 }
 
 export function createConfig(): ServerConfig {
-  return {
+  const authMode = parseAuthMode(process.env.AZURE_AUTH_MODE)
+
+  const config: ServerConfig = {
     clientId: process.env.AZURE_CLIENT_ID ?? DEFAULT_CLIENT_ID,
     clientSecret: process.env.AZURE_CLIENT_SECRET ?? "",
     tenantId: process.env.AZURE_TENANT_ID ?? "common",
@@ -32,17 +54,34 @@ export function createConfig(): ServerConfig {
       "Files.Read",
       "Sites.Read.All",
     ],
+    authMode,
+    appScopes: process.env.GRAPH_APP_SCOPES?.split(",").map((s) => s.trim()) ?? [
+      "https://graph.microsoft.com/.default",
+    ],
+    apiKey: process.env.MCP_API_KEY || undefined,
   }
+
+  validateConfig(config)
+
+  return config
 }
 
 export function createServer(config: ServerConfig) {
-  const authProvider = new AzureProvider({
-    clientId: config.clientId,
-    clientSecret: config.clientSecret,
-    baseUrl: config.baseUrl,
-    tenantId: config.tenantId,
-    scopes: config.scopes,
-  })
+  const isClientCredentials = config.authMode === "clientCredentials"
+
+  // Only create AzureProvider for interactive mode
+  const authProvider = isClientCredentials
+    ? undefined
+    : new AzureProvider({
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+        baseUrl: config.baseUrl,
+        tenantId: config.tenantId,
+        scopes: config.scopes,
+      })
+
+  // Create token manager for client credentials mode
+  const tokenManager: TokenManager | undefined = isClientCredentials ? createTokenManager(config) : undefined
 
   const server = new FastMCP({
     name: "microsoft-graph-server",
@@ -56,6 +95,16 @@ export function createServer(config: ServerConfig) {
       message: "healthy",
       status: 200,
     },
+    authenticate: config.apiKey
+      ? async (request) => {
+          const authHeader = request.headers.authorization
+          const providedKey = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : undefined
+          if (providedKey !== config.apiKey) {
+            throw new Error("Unauthorized")
+          }
+          return {}
+        }
+      : undefined,
   })
 
   server.addTool({
@@ -77,9 +126,18 @@ export function createServer(config: ServerConfig) {
       body: z.unknown().optional().describe("Request body for POST/PUT/PATCH operations"),
     }),
     execute: async (args, { session, log }) => {
-      const authSession = session as OAuthSession | undefined
-      if (!authSession?.accessToken) {
-        throw new Error("Not authenticated. Please sign in first.")
+      let accessToken: string
+
+      if (isClientCredentials && tokenManager) {
+        // Client credentials mode - get token from token manager
+        accessToken = await tokenManager.getToken()
+      } else {
+        // Interactive mode - get token from session
+        const authSession = session as OAuthSession | undefined
+        if (!authSession?.accessToken) {
+          throw new Error("Not authenticated. Please sign in first.")
+        }
+        accessToken = authSession.accessToken
       }
 
       const baseUrl = args.apiType === "azure" ? AZURE_BASE_URL : GRAPH_BASE_URL
@@ -101,7 +159,7 @@ export function createServer(config: ServerConfig) {
       const fetchOptions: RequestInit = {
         method: args.method,
         headers: {
-          Authorization: `Bearer ${authSession!.accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
       }
@@ -137,11 +195,40 @@ export function createServer(config: ServerConfig) {
     description: "Check the current authentication status.",
     parameters: z.object({}),
     execute: async (_args, { session }) => {
+      if (isClientCredentials && tokenManager) {
+        // Client credentials mode - check token manager
+        try {
+          const appSession = await tokenManager.getSession()
+          return JSON.stringify(
+            {
+              authenticated: true,
+              mode: "clientCredentials",
+              message: "Authenticated via client credentials (app-only)",
+              expiresAt: appSession.expiresAt.toISOString(),
+            },
+            null,
+            2,
+          )
+        } catch (error) {
+          return JSON.stringify(
+            {
+              authenticated: false,
+              mode: "clientCredentials",
+              message: `Authentication failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+            },
+            null,
+            2,
+          )
+        }
+      }
+
+      // Interactive mode
       const authSession = session as AzureSession | undefined
       const hasAuth = !!authSession?.accessToken
       return JSON.stringify(
         {
           authenticated: hasAuth,
+          mode: "interactive",
           message: hasAuth ? "Authenticated via Azure OAuth" : "Not authenticated. Please sign in.",
           scopes: authSession?.scopes,
           upn: authSession?.upn,
@@ -152,7 +239,7 @@ export function createServer(config: ServerConfig) {
     },
   })
 
-  return { server, authProvider, config }
+  return { server, authProvider, tokenManager, config }
 }
 
 export async function runServer(): Promise<void> {
@@ -174,6 +261,10 @@ export async function runServer(): Promise<void> {
       },
     })
     console.error(`Microsoft Graph MCP Server running on http://localhost:${config.port}`)
-    console.error(`OAuth callback URL: ${config.baseUrl}/oauth/callback`)
+    if (config.authMode === "interactive") {
+      console.error(`OAuth callback URL: ${config.baseUrl}/oauth/callback`)
+    } else {
+      console.error(`Auth mode: client credentials (app-only)`)
+    }
   }
 }
