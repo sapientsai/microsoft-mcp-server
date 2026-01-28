@@ -42,6 +42,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.9",
+    "rimraf": "^6.1.2",
     "ts-builds": "^2.2.2",
     "tsdown": "^0.20.1"
   },
