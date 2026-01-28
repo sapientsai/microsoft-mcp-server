@@ -258,6 +258,7 @@ export async function runServer(): Promise<void> {
       transportType: "httpStream",
       httpStream: {
         port: config.port,
+        host: "0.0.0.0",
       },
     })
     console.error(`Microsoft Graph MCP Server running on http://localhost:${config.port}`)
