@@ -41,8 +41,8 @@ ENV TRANSPORT_TYPE=httpStream
 
 EXPOSE 8080
 
-# Health check
+# Health check - use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:${PORT}/health || exit 1
 
 CMD ["node", "dist/bin.js"]
