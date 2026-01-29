@@ -83,11 +83,15 @@ export function createServer(config: ServerConfig) {
   // Create token manager for client credentials mode
   const tokenManager: TokenManager | undefined = isClientCredentials ? createTokenManager(config) : undefined
 
+  const baseInstructions =
+    "Microsoft Graph MCP Server - Access Microsoft 365 data including users, mail, calendar, files, and more."
+  const customInstructions = process.env.MCP_INSTRUCTIONS
+  const instructions = customInstructions ? `${baseInstructions}\n\n${customInstructions}` : baseInstructions
+
   const server = new FastMCP({
     name: "microsoft-graph-server",
     version: "1.0.0",
-    instructions:
-      "Microsoft Graph MCP Server - Access Microsoft 365 data including users, mail, calendar, files, and more.",
+    instructions,
     auth: authProvider,
     health: {
       enabled: true,
