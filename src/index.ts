@@ -123,10 +123,13 @@ export function createServer(config: ServerConfig) {
       : undefined,
   })
 
+  const baseToolDescription =
+    "Execute Microsoft Graph API requests. Use this to access Microsoft 365 data including users, mail, calendar, files, and more."
+  const toolDescription = customInstructions ? `${baseToolDescription} ${customInstructions}` : baseToolDescription
+
   server.addTool({
     name: "microsoft_graph",
-    description:
-      "Execute Microsoft Graph API requests. Use this to access Microsoft 365 data including users, mail, calendar, files, and more.",
+    description: toolDescription,
     parameters: z.object({
       apiType: z
         .enum(["graph", "azure"])
