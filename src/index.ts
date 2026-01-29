@@ -97,8 +97,20 @@ export function createServer(config: ServerConfig) {
     },
     authenticate: config.apiKey
       ? async (request) => {
+          // Check Authorization header first
           const authHeader = request.headers.authorization
-          const providedKey = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : undefined
+          let providedKey = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : undefined
+
+          // Fall back to api_key query parameter if no header
+          if (!providedKey && request.url) {
+            try {
+              const url = new URL(request.url, "http://localhost")
+              providedKey = url.searchParams.get("api_key") ?? undefined
+            } catch {
+              // Ignore URL parsing errors
+            }
+          }
+
           if (providedKey !== config.apiKey) {
             throw new Error("Unauthorized")
           }
