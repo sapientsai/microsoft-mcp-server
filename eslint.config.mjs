@@ -1,3 +1,3 @@
-import baseConfig from "ts-builds/eslint"
+import config from "ts-builds/eslint-fp"
 
-export default [...baseConfig]
+export default [...config]

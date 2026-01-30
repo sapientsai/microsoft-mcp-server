@@ -24,7 +24,7 @@ function parseAuthMode(value: string | undefined): AuthMode {
   throw new Error(`Invalid AZURE_AUTH_MODE: "${value}". Must be "interactive" or "clientCredentials".`)
 }
 
-function validateConfig(config: ServerConfig): void {
+function validateConfig(config: Readonly<ServerConfig>): void {
   if (config.authMode === "clientCredentials") {
     if (config.tenantId === "common") {
       throw new Error('Client credentials auth requires a specific tenant ID, not "common".')
@@ -35,10 +35,10 @@ function validateConfig(config: ServerConfig): void {
   }
 }
 
-export function createConfig(): ServerConfig {
+export function createConfig(): Readonly<ServerConfig> {
   const authMode = parseAuthMode(process.env.AZURE_AUTH_MODE)
 
-  const config: ServerConfig = {
+  const config: Readonly<ServerConfig> = {
     clientId: process.env.AZURE_CLIENT_ID ?? DEFAULT_CLIENT_ID,
     clientSecret: process.env.AZURE_CLIENT_SECRET ?? "",
     tenantId: process.env.AZURE_TENANT_ID ?? "common",
@@ -58,7 +58,7 @@ export function createConfig(): ServerConfig {
     appScopes: process.env.GRAPH_APP_SCOPES?.split(",").map((s) => s.trim()) ?? [
       "https://graph.microsoft.com/.default",
     ],
-    apiKey: process.env.MCP_API_KEY || undefined,
+    apiKey: process.env.MCP_API_KEY ?? undefined,
   }
 
   validateConfig(config)
@@ -66,7 +66,7 @@ export function createConfig(): ServerConfig {
   return config
 }
 
-export function createServer(config: ServerConfig) {
+export function createServer(config: Readonly<ServerConfig>) {
   const isClientCredentials = config.authMode === "clientCredentials"
 
   // Only create AzureProvider for interactive mode
@@ -100,25 +100,30 @@ export function createServer(config: ServerConfig) {
       status: 200,
     },
     authenticate: config.apiKey
-      ? async (request) => {
+      ? (request) => {
           // Check Authorization header first
           const authHeader = request.headers.authorization
-          let providedKey = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : undefined
+          const headerKey = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : undefined
 
           // Fall back to api_key query parameter if no header
-          if (!providedKey && request.url) {
-            try {
-              const url = new URL(request.url, "http://localhost")
-              providedKey = url.searchParams.get("api_key") ?? undefined
-            } catch {
-              // Ignore URL parsing errors
-            }
-          }
+          const queryKey =
+            !headerKey && request.url
+              ? (() => {
+                  try {
+                    const url = new URL(request.url, "http://localhost")
+                    return url.searchParams.get("api_key") ?? undefined
+                  } catch {
+                    return undefined
+                  }
+                })()
+              : undefined
+
+          const providedKey = headerKey ?? queryKey
 
           if (providedKey !== config.apiKey) {
             throw new Error("Unauthorized")
           }
-          return {}
+          return Promise.resolve({})
         }
       : undefined,
   })
@@ -145,57 +150,39 @@ export function createServer(config: ServerConfig) {
       body: z.unknown().optional().describe("Request body for POST/PUT/PATCH operations"),
     }),
     execute: async (args, { session, log }) => {
-      let accessToken: string
-
-      if (isClientCredentials && tokenManager) {
-        // Client credentials mode - get token from token manager
-        accessToken = await tokenManager.getToken()
-      } else {
-        // Interactive mode - get token from session
-        const authSession = session as OAuthSession | undefined
-        if (!authSession?.accessToken) {
-          throw new Error("Not authenticated. Please sign in first.")
-        }
-        accessToken = authSession.accessToken
-      }
+      const accessToken =
+        isClientCredentials && tokenManager
+          ? await tokenManager.getToken()
+          : (() => {
+              const authSession = session as OAuthSession | undefined
+              if (!authSession?.accessToken) {
+                throw new Error("Not authenticated. Please sign in first.")
+              }
+              return authSession.accessToken
+            })()
 
       const baseUrl = args.apiType === "azure" ? AZURE_BASE_URL : GRAPH_BASE_URL
-      let url: string
-
-      if (args.apiType === "azure") {
-        url = `${baseUrl}${args.path}`
-      } else {
-        url = `${baseUrl}/${args.apiVersion}${args.path}`
-      }
-
-      if (args.queryParams && Object.keys(args.queryParams).length > 0) {
-        const params = new URLSearchParams(args.queryParams)
-        url += `?${params.toString()}`
-      }
+      const basePath = args.apiType === "azure" ? `${baseUrl}${args.path}` : `${baseUrl}/${args.apiVersion}${args.path}`
+      const url =
+        args.queryParams && Object.keys(args.queryParams).length > 0
+          ? `${basePath}?${new URLSearchParams(args.queryParams).toString()}`
+          : basePath
 
       log.info("Calling Microsoft Graph API", { url, method: args.method })
 
-      const fetchOptions: RequestInit = {
+      const fetchOptions: Readonly<RequestInit> = {
         method: args.method,
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
-      }
-
-      if (args.body && ["POST", "PUT", "PATCH"].includes(args.method)) {
-        fetchOptions.body = JSON.stringify(args.body)
+        ...(args.body && ["POST", "PUT", "PATCH"].includes(args.method) ? { body: JSON.stringify(args.body) } : {}),
       }
 
       const response = await fetch(url, fetchOptions)
 
-      let data: unknown
       const contentType = response.headers.get("content-type")
-      if (contentType?.includes("application/json")) {
-        data = await response.json()
-      } else {
-        data = await response.text()
-      }
+      const data: unknown = contentType?.includes("application/json") ? await response.json() : await response.text()
 
       if (!response.ok) {
         const errorMessage =
