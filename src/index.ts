@@ -1,11 +1,11 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import { basename, extname, join } from "node:path"
 
+import ExcelJS from "exceljs"
 import type { AzureSession, OAuthSession } from "fastmcp"
 import { AzureProvider, FastMCP, imageContent } from "fastmcp"
 import mammoth from "mammoth"
 import { extractText as extractPdfText, getDocumentProxy } from "unpdf"
-import XLSX from "xlsx"
 import { z } from "zod"
 
 import type { TokenManager } from "./auth/token-manager.js"
@@ -517,18 +517,22 @@ export async function extractTextFromBuffer(buffer: Buffer, contentType: string,
 
   // XLSX
   if (resolved === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
-    const wb = XLSX.read(buffer, { type: "buffer" })
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.load(buffer as unknown as ArrayBuffer)
     const parts: string[] = []
-    for (const name of wb.SheetNames) {
-      const ws = wb.Sheets[name]
-      if (!ws) continue
-      const csv = XLSX.utils.sheet_to_csv(ws)
-      if (wb.SheetNames.length > 1) {
-        parts.push(`[Sheet: ${name}]\n${csv}`)
+    wb.eachSheet((ws) => {
+      const rows: string[] = []
+      ws.eachRow((row) => {
+        const cells = Array.isArray(row.values) ? row.values.slice(1) : []
+        rows.push(cells.map((v) => (v == null ? "" : String(v))).join(","))
+      })
+      const csv = rows.join("\n")
+      if (wb.worksheets.length > 1) {
+        parts.push(`[Sheet: ${ws.name}]\n${csv}`)
       } else {
         parts.push(csv)
       }
-    }
+    })
     return parts.join("\n\n")
   }
 

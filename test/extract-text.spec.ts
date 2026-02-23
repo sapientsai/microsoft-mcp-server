@@ -1,17 +1,19 @@
+import ExcelJS from "exceljs"
 import { describe, expect, it } from "vitest"
-import XLSX from "xlsx"
 
 import { EXTRACTABLE_TYPES, extractTextFromBuffer } from "../src/index.js"
 
 // Helper to create a minimal valid XLSX buffer with data
-function createXlsxBuffer(sheets: Record<string, string[][]>): Buffer {
-  const wb = XLSX.utils.book_new()
+async function createXlsxBuffer(sheets: Record<string, string[][]>): Promise<Buffer> {
+  const wb = new ExcelJS.Workbook()
   for (const [name, rows] of Object.entries(sheets)) {
-    const ws = XLSX.utils.aoa_to_sheet(rows)
-    XLSX.utils.book_append_sheet(wb, ws, name)
+    const ws = wb.addWorksheet(name)
+    for (const row of rows) {
+      ws.addRow(row)
+    }
   }
-  const out = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer
-  return Buffer.from(out)
+  const arrayBuffer = await wb.xlsx.writeBuffer()
+  return Buffer.from(arrayBuffer)
 }
 
 describe("extractTextFromBuffer", () => {
@@ -46,7 +48,7 @@ describe("extractTextFromBuffer", () => {
 
   describe("XLSX extraction", () => {
     it("should extract text from single-sheet XLSX", async () => {
-      const buffer = createXlsxBuffer({
+      const buffer = await createXlsxBuffer({
         Sheet1: [
           ["Name", "Age"],
           ["Alice", "30"],
@@ -70,7 +72,7 @@ describe("extractTextFromBuffer", () => {
     })
 
     it("should extract text from multi-sheet XLSX with headers", async () => {
-      const buffer = createXlsxBuffer({
+      const buffer = await createXlsxBuffer({
         People: [
           ["Name", "Age"],
           ["Alice", "30"],
@@ -94,7 +96,7 @@ describe("extractTextFromBuffer", () => {
     })
 
     it("should infer XLSX type from extension when content type is octet-stream", async () => {
-      const buffer = createXlsxBuffer({
+      const buffer = await createXlsxBuffer({
         Sheet1: [["Test", "Data"]],
       })
 
