@@ -1,5 +1,9 @@
+import { mkdir, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { basename, join } from "node:path"
+
 import type { AzureSession, OAuthSession } from "fastmcp"
-import { AzureProvider, FastMCP } from "fastmcp"
+import { AzureProvider, FastMCP, imageContent } from "fastmcp"
 import { z } from "zod"
 
 import type { TokenManager } from "./auth/token-manager.js"
@@ -128,6 +132,17 @@ export function createServer(config: Readonly<ServerConfig>) {
       : undefined,
   })
 
+  const resolveAccessToken = async (session: unknown): Promise<string> => {
+    if (isClientCredentials && tokenManager) {
+      return tokenManager.getToken()
+    }
+    const authSession = session as OAuthSession | undefined
+    if (!authSession?.accessToken) {
+      throw new Error("Not authenticated. Please sign in first.")
+    }
+    return authSession.accessToken
+  }
+
   const baseToolDescription =
     "Execute Microsoft Graph API requests. Use this to access Microsoft 365 data including users, mail, calendar, files, and more."
   const toolDescription = customInstructions ? `${baseToolDescription} ${customInstructions}` : baseToolDescription
@@ -150,16 +165,7 @@ export function createServer(config: Readonly<ServerConfig>) {
       body: z.unknown().optional().describe("Request body for POST/PUT/PATCH operations"),
     }),
     execute: async (args, { session, log }) => {
-      const accessToken =
-        isClientCredentials && tokenManager
-          ? await tokenManager.getToken()
-          : (() => {
-              const authSession = session as OAuthSession | undefined
-              if (!authSession?.accessToken) {
-                throw new Error("Not authenticated. Please sign in first.")
-              }
-              return authSession.accessToken
-            })()
+      const accessToken = await resolveAccessToken(session)
 
       const baseUrl = args.apiType === "azure" ? AZURE_BASE_URL : GRAPH_BASE_URL
       const basePath = args.apiType === "azure" ? `${baseUrl}${args.path}` : `${baseUrl}/${args.apiVersion}${args.path}`
@@ -245,7 +251,155 @@ export function createServer(config: Readonly<ServerConfig>) {
     },
   })
 
+  server.addTool({
+    name: "download_file",
+    description:
+      "Download a file from SharePoint or OneDrive via Microsoft Graph API. Returns file content directly to the agent: images are returned inline, text files as text content, and binary files (Office docs, PDFs) are saved to disk. Supports optional format conversion (e.g., PDF).",
+    parameters: z.object({
+      path: z
+        .string()
+        .describe(
+          "Graph API path to the file content endpoint (e.g., /me/drive/items/{id}/content, /sites/{siteId}/drive/items/{id}/content, /me/drive/root:/Documents/report.pdf:/content)",
+        ),
+      apiVersion: z.enum(["v1.0", "beta"]).default("v1.0").describe("Graph API version"),
+      format: z
+        .string()
+        .optional()
+        .describe("Optional conversion format (e.g., 'pdf'). Only supported for certain file types."),
+      outputDir: z.string().optional().describe("Directory to save the file. Defaults to system temp directory."),
+      filename: z
+        .string()
+        .optional()
+        .describe("Override filename. If not provided, uses the filename from the response headers or URL."),
+    }),
+    execute: async (args, { session, log }) => {
+      const accessToken = await resolveAccessToken(session)
+
+      const queryParams = args.format ? `?format=${args.format}` : ""
+      const url = `${GRAPH_BASE_URL}/${args.apiVersion}${args.path}${queryParams}`
+
+      log.info("Downloading file from Microsoft Graph", { url })
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      })
+
+      if (!response.ok) {
+        const responseContentType = response.headers.get("content-type")
+        if (responseContentType?.includes("application/json")) {
+          const errorData = (await response.json()) as { error?: { message?: string } }
+          throw new Error(errorData.error?.message ?? `HTTP ${response.status}: ${response.statusText}`)
+        }
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+
+      const contentType = response.headers.get("content-type") ?? "application/octet-stream"
+      const resolvedFilename =
+        args.filename ?? filenameFromHeaders(response.headers) ?? filenameFromPath(args.path) ?? "download"
+      const buffer = Buffer.from(await response.arrayBuffer())
+
+      return processDownloadResponse(buffer, contentType, resolvedFilename, args.outputDir)
+    },
+  })
+
   return { server, authProvider, tokenManager, config }
+}
+
+export const TEXT_MIME_PREFIXES = ["text/", "application/json", "application/xml", "application/csv"]
+export const TEXT_MIME_SUFFIXES = ["+xml", "+json"]
+
+export function isTextContent(contentType: string): boolean {
+  const lower = contentType.toLowerCase()
+  return (
+    TEXT_MIME_PREFIXES.some((prefix) => lower.startsWith(prefix)) ||
+    TEXT_MIME_SUFFIXES.some((suffix) => lower.includes(suffix))
+  )
+}
+
+export function filenameFromHeaders(headers: Headers): string | undefined {
+  const disposition = headers.get("content-disposition")
+  if (!disposition) return undefined
+  const match = /filename\*?=(?:UTF-8''|"?)([^";]+)"?/i.exec(disposition)
+  return match?.[1] ? decodeURIComponent(match[1]) : undefined
+}
+
+export function filenameFromPath(path: string): string | undefined {
+  // Handle paths like /me/drive/root:/Documents/report.pdf:/content
+  const colonPathMatch = /:\/([^:]+):\/content/i.exec(path)
+  if (colonPathMatch?.[1]) {
+    return basename(colonPathMatch[1])
+  }
+  return undefined
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B"
+  const units = ["B", "KB", "MB", "GB"]
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const value = bytes / Math.pow(1024, i)
+  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+export type DownloadResult = {
+  content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>
+}
+
+export async function processDownloadResponse(
+  buffer: Buffer,
+  contentType: string,
+  filename: string,
+  outputDir?: string,
+): Promise<DownloadResult> {
+  // Images: return inline via MCP image content so the LLM can see them
+  if (contentType.startsWith("image/")) {
+    const img = await imageContent({ buffer })
+    return {
+      content: [{ type: "text" as const, text: `Image: ${filename} (${formatBytes(buffer.length)})` }, img],
+    }
+  }
+
+  // Text-based files: return content inline so the LLM can read them
+  if (isTextContent(contentType)) {
+    const text = buffer.toString("utf-8")
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `File: ${filename} (${formatBytes(buffer.length)}, ${contentType})\n\n${text}`,
+        },
+      ],
+    }
+  }
+
+  // Binary files (Office docs, PDFs, etc.): save to disk and return path
+  const resolvedOutputDir = outputDir ?? join(tmpdir(), "microsoft-graph-downloads")
+  await mkdir(resolvedOutputDir, { recursive: true })
+  const outputPath = join(resolvedOutputDir, filename)
+  await writeFile(outputPath, buffer)
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(
+          {
+            saved: true,
+            path: outputPath,
+            filename,
+            contentType,
+            size: buffer.length,
+            sizeFormatted: formatBytes(buffer.length),
+            hint: "File saved to disk. Use the path to read it with your file reading tools.",
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  }
 }
 
 export async function runServer(): Promise<void> {
