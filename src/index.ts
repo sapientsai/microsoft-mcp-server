@@ -1,5 +1,4 @@
 import { mkdir, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 
 import type { AzureSession, OAuthSession } from "fastmcp"
@@ -374,11 +373,18 @@ export async function processDownloadResponse(
     }
   }
 
-  // Binary files (Office docs, PDFs, etc.): save to disk and return path
-  const resolvedOutputDir = outputDir ?? join(tmpdir(), "microsoft-graph-downloads")
-  await mkdir(resolvedOutputDir, { recursive: true })
-  const outputPath = join(resolvedOutputDir, filename)
-  await writeFile(outputPath, buffer)
+  // Binary files (Office docs, PDFs, etc.): return base64 content + optionally save to disk
+  const base64Data = buffer.toString("base64")
+
+  // Save to disk when outputDir is explicitly provided (useful for stdio/local mode)
+  const savedPath = outputDir
+    ? await (async () => {
+        await mkdir(outputDir, { recursive: true })
+        const outputPath = join(outputDir, filename)
+        await writeFile(outputPath, buffer)
+        return outputPath
+      })()
+    : undefined
 
   return {
     content: [
@@ -386,13 +392,13 @@ export async function processDownloadResponse(
         type: "text" as const,
         text: JSON.stringify(
           {
-            saved: true,
-            path: outputPath,
             filename,
             contentType,
             size: buffer.length,
             sizeFormatted: formatBytes(buffer.length),
-            hint: "File saved to disk. Use the path to read it with your file reading tools.",
+            encoding: "base64",
+            data: base64Data,
+            ...(savedPath ? { savedTo: savedPath } : {}),
           },
           null,
           2,
