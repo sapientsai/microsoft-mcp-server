@@ -7,6 +7,8 @@ Built with [FastMCP](https://github.com/punkpeye/fastmcp) for seamless OAuth aut
 ## Features
 
 - **Microsoft Graph API Access**: Execute any Graph API endpoint through a unified tool
+- **Document Reading**: Extract readable text from DOCX, PDF, and XLSX files stored in SharePoint/OneDrive
+- **File Downloads**: Download files with automatic handling for images, text, and binary content
 - **Dual Authentication Modes**:
   - **Interactive** (default): OAuth 2.0 authorization code flow with user login
   - **Client Credentials**: App-only authentication for headless/server deployments
@@ -193,6 +195,40 @@ Execute Microsoft Graph API requests.
 - "List all users in my organization"
 - "Create a calendar event for tomorrow at 2pm titled 'Team Sync'"
 - "Search for files containing 'budget' in my OneDrive"
+
+### `read_document`
+
+Download a file from SharePoint or OneDrive and return its readable text content. Use this instead of `download_file` when you need to read document contents.
+
+**Supported formats:** DOCX, PDF, XLSX, and all text-based files (CSV, JSON, XML, HTML, etc.)
+
+**Parameters:**
+
+| Parameter    | Required | Description                                                |
+| ------------ | -------- | ---------------------------------------------------------- |
+| `path`       | Yes      | Graph API path to file content endpoint                    |
+| `apiVersion` | No       | Graph API version: v1.0, beta (default: v1.0)              |
+| `format`     | No       | Optional conversion format (e.g., 'pdf') before extraction |
+
+**Example prompts to Claude:**
+
+- "Read the Q4 report from SharePoint"
+- "What does the contract document say about payment terms?"
+- "Summarize the data in the budget spreadsheet"
+
+### `download_file`
+
+Download a file from SharePoint or OneDrive. Returns images inline, text files as content, and binary files as base64. Use `read_document` instead if you need readable text from Office documents or PDFs.
+
+**Parameters:**
+
+| Parameter    | Required | Description                                             |
+| ------------ | -------- | ------------------------------------------------------- |
+| `path`       | Yes      | Graph API path to file content endpoint                 |
+| `apiVersion` | No       | Graph API version: v1.0, beta (default: v1.0)           |
+| `format`     | No       | Optional conversion format (e.g., 'pdf')                |
+| `outputDir`  | No       | Directory to save the file (defaults to temp directory) |
+| `filename`   | No       | Override filename                                       |
 
 ### `get_auth_status`
 

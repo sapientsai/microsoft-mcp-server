@@ -1,8 +1,11 @@
 import { mkdir, writeFile } from "node:fs/promises"
-import { basename, join } from "node:path"
+import { basename, extname, join } from "node:path"
 
 import type { AzureSession, OAuthSession } from "fastmcp"
 import { AzureProvider, FastMCP, imageContent } from "fastmcp"
+import mammoth from "mammoth"
+import { extractText as extractPdfText, getDocumentProxy } from "unpdf"
+import XLSX from "xlsx"
 import { z } from "zod"
 
 import type { TokenManager } from "./auth/token-manager.js"
@@ -304,6 +307,63 @@ export function createServer(config: Readonly<ServerConfig>) {
     },
   })
 
+  server.addTool({
+    name: "read_document",
+    description:
+      "Download a file from SharePoint or OneDrive and return its readable text content. Supports DOCX, PDF, XLSX, and text-based files. Use this instead of download_file when you need to read document contents.",
+    parameters: z.object({
+      path: z
+        .string()
+        .describe(
+          "Graph API path to the file content endpoint (e.g., /me/drive/items/{id}/content, /sites/{siteId}/drive/items/{id}/content, /me/drive/root:/Documents/report.pdf:/content)",
+        ),
+      apiVersion: z.enum(["v1.0", "beta"]).default("v1.0").describe("Graph API version"),
+      format: z
+        .string()
+        .optional()
+        .describe("Optional conversion format (e.g., 'pdf'). Only supported for certain file types."),
+    }),
+    execute: async (args, { session, log }) => {
+      const accessToken = await resolveAccessToken(session)
+
+      const queryParams = args.format ? `?format=${args.format}` : ""
+      const url = `${GRAPH_BASE_URL}/${args.apiVersion}${args.path}${queryParams}`
+
+      log.info("Downloading file for text extraction", { url })
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      })
+
+      if (!response.ok) {
+        const responseContentType = response.headers.get("content-type")
+        if (responseContentType?.includes("application/json")) {
+          const errorData = (await response.json()) as { error?: { message?: string } }
+          throw new Error(errorData.error?.message ?? `HTTP ${response.status}: ${response.statusText}`)
+        }
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+
+      const contentType = response.headers.get("content-type") ?? "application/octet-stream"
+      const resolvedFilename = filenameFromHeaders(response.headers) ?? filenameFromPath(args.path) ?? "download"
+      const buffer = Buffer.from(await response.arrayBuffer())
+
+      const text = await extractTextFromBuffer(buffer, contentType, resolvedFilename)
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `File: ${resolvedFilename} (${formatBytes(buffer.length)})\n\n${text}`,
+          },
+        ],
+      }
+    },
+  })
+
   return { server, authProvider, tokenManager, config }
 }
 
@@ -406,6 +466,74 @@ export async function processDownloadResponse(
       },
     ],
   }
+}
+
+const CONTENT_TYPE_MAP: Record<string, string> = {
+  ".pdf": "application/pdf",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+export const EXTRACTABLE_TYPES = [
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+] as const
+
+function resolveContentType(contentType: string, filename: string): string {
+  const lower = contentType.toLowerCase()
+  // If the content type is generic, try to infer from file extension
+  if (lower === "application/octet-stream" || lower === "") {
+    const ext = extname(filename).toLowerCase()
+    return CONTENT_TYPE_MAP[ext] ?? contentType
+  }
+  return lower
+}
+
+export async function extractTextFromBuffer(buffer: Buffer, contentType: string, filename: string): Promise<string> {
+  const resolved = resolveContentType(contentType, filename)
+
+  // Text-based types: return directly
+  if (isTextContent(resolved)) {
+    return buffer.toString("utf-8")
+  }
+
+  // PDF
+  if (resolved === "application/pdf") {
+    const pdf = await getDocumentProxy(new Uint8Array(buffer))
+    try {
+      const { totalPages, text } = await extractPdfText(pdf, { mergePages: true })
+      return `[PDF: ${totalPages} page${totalPages === 1 ? "" : "s"}]\n\n${text}`
+    } finally {
+      await pdf.destroy()
+    }
+  }
+
+  // DOCX
+  if (resolved === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    const result = await mammoth.extractRawText({ buffer })
+    return result.value
+  }
+
+  // XLSX
+  if (resolved === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+    const wb = XLSX.read(buffer, { type: "buffer" })
+    const parts: string[] = []
+    for (const name of wb.SheetNames) {
+      const ws = wb.Sheets[name]
+      if (!ws) continue
+      const csv = XLSX.utils.sheet_to_csv(ws)
+      if (wb.SheetNames.length > 1) {
+        parts.push(`[Sheet: ${name}]\n${csv}`)
+      } else {
+        parts.push(csv)
+      }
+    }
+    return parts.join("\n\n")
+  }
+
+  const supported = [...EXTRACTABLE_TYPES, "text/*"].join(", ")
+  throw new Error(`Unsupported content type "${contentType}" for text extraction. Supported: ${supported}`)
 }
 
 export async function runServer(): Promise<void> {
