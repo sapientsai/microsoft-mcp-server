@@ -252,118 +252,134 @@ describe("processDownloadResponse", () => {
     })
   })
 
-  describe("binary content (save to disk)", () => {
-    it("should save PDF files to disk and return path", async () => {
+  describe("binary content (base64)", () => {
+    it("should return base64-encoded PDF content", async () => {
       const pdfBuffer = Buffer.from("%PDF-1.4 fake pdf content for testing")
-      const result = await processDownloadResponse(pdfBuffer, "application/pdf", "report.pdf", testOutputDir)
+      const result = await processDownloadResponse(pdfBuffer, "application/pdf", "report.pdf")
 
       expect(result.content).toHaveLength(1)
       const textContent = result.content[0] as { type: "text"; text: string }
       const parsed = JSON.parse(textContent.text) as {
-        saved: boolean
-        path: string
         filename: string
         contentType: string
         size: number
         sizeFormatted: string
-        hint: string
+        encoding: string
+        data: string
       }
 
-      expect(parsed.saved).toBe(true)
       expect(parsed.filename).toBe("report.pdf")
       expect(parsed.contentType).toBe("application/pdf")
       expect(parsed.size).toBe(pdfBuffer.length)
       expect(parsed.sizeFormatted).toMatch(/\d+(\.\d+)?\s*(B|KB|MB|GB)/)
-      expect(parsed.hint).toContain("file reading tools")
-      expect(existsSync(parsed.path)).toBe(true)
+      expect(parsed.encoding).toBe("base64")
+      expect(parsed.data).toBe(pdfBuffer.toString("base64"))
 
-      const savedContent = await readFile(parsed.path)
-      expect(savedContent.toString()).toBe("%PDF-1.4 fake pdf content for testing")
+      // Verify round-trip: base64 decodes back to original content
+      const decoded = Buffer.from(parsed.data, "base64")
+      expect(decoded.toString()).toBe("%PDF-1.4 fake pdf content for testing")
     })
 
-    it("should save DOCX files to disk", async () => {
+    it("should return base64-encoded DOCX content", async () => {
       const docxBuffer = Buffer.from("PK\x03\x04 fake docx content")
       const result = await processDownloadResponse(
         docxBuffer,
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "document.docx",
-        testOutputDir,
       )
 
       const textContent = result.content[0] as { type: "text"; text: string }
-      const parsed = JSON.parse(textContent.text) as { saved: boolean; filename: string; contentType: string }
-      expect(parsed.saved).toBe(true)
+      const parsed = JSON.parse(textContent.text) as {
+        filename: string
+        contentType: string
+        encoding: string
+        data: string
+      }
       expect(parsed.filename).toBe("document.docx")
       expect(parsed.contentType).toBe("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+      expect(parsed.encoding).toBe("base64")
+      expect(Buffer.from(parsed.data, "base64").toString()).toBe("PK\x03\x04 fake docx content")
     })
 
-    it("should save XLSX files to disk", async () => {
+    it("should return base64-encoded XLSX content", async () => {
       const xlsxBuffer = Buffer.from("PK\x03\x04 fake xlsx content")
       const result = await processDownloadResponse(
         xlsxBuffer,
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "data.xlsx",
-        testOutputDir,
       )
 
       const textContent = result.content[0] as { type: "text"; text: string }
-      const parsed = JSON.parse(textContent.text) as { saved: boolean; filename: string }
-      expect(parsed.saved).toBe(true)
+      const parsed = JSON.parse(textContent.text) as { filename: string; encoding: string; data: string }
       expect(parsed.filename).toBe("data.xlsx")
+      expect(parsed.encoding).toBe("base64")
+      expect(Buffer.from(parsed.data, "base64").toString()).toBe("PK\x03\x04 fake xlsx content")
     })
 
-    it("should save PPTX files to disk", async () => {
+    it("should return base64-encoded PPTX content", async () => {
       const pptxBuffer = Buffer.from("PK\x03\x04 fake pptx content")
       const result = await processDownloadResponse(
         pptxBuffer,
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "slides.pptx",
-        testOutputDir,
       )
 
       const textContent = result.content[0] as { type: "text"; text: string }
-      const parsed = JSON.parse(textContent.text) as { saved: boolean; filename: string }
-      expect(parsed.saved).toBe(true)
+      const parsed = JSON.parse(textContent.text) as { filename: string; encoding: string }
       expect(parsed.filename).toBe("slides.pptx")
+      expect(parsed.encoding).toBe("base64")
     })
 
-    it("should save octet-stream files to disk", async () => {
+    it("should return base64-encoded octet-stream content", async () => {
       const binaryBuffer = Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff])
-      const result = await processDownloadResponse(
-        binaryBuffer,
-        "application/octet-stream",
-        "unknown.bin",
-        testOutputDir,
-      )
+      const result = await processDownloadResponse(binaryBuffer, "application/octet-stream", "unknown.bin")
 
       const textContent = result.content[0] as { type: "text"; text: string }
-      const parsed = JSON.parse(textContent.text) as { saved: boolean; filename: string; contentType: string }
-      expect(parsed.saved).toBe(true)
+      const parsed = JSON.parse(textContent.text) as {
+        filename: string
+        contentType: string
+        encoding: string
+        data: string
+      }
       expect(parsed.filename).toBe("unknown.bin")
       expect(parsed.contentType).toBe("application/octet-stream")
+      expect(parsed.encoding).toBe("base64")
+
+      const decoded = Buffer.from(parsed.data, "base64")
+      expect([...decoded]).toEqual([0x00, 0x01, 0x02, 0x03, 0xff])
     })
 
-    it("should create output directory if it does not exist", async () => {
+    it("should not include savedTo when no outputDir specified", async () => {
+      const pdfBuffer = Buffer.from("%PDF-1.4 test")
+      const result = await processDownloadResponse(pdfBuffer, "application/pdf", "no-disk.pdf")
+
+      const textContent = result.content[0] as { type: "text"; text: string }
+      const parsed = JSON.parse(textContent.text) as Record<string, unknown>
+      expect(parsed).not.toHaveProperty("savedTo")
+    })
+
+    it("should also save to disk when outputDir is provided", async () => {
+      const pdfBuffer = Buffer.from("%PDF-1.4 fake pdf content for testing")
+      const result = await processDownloadResponse(pdfBuffer, "application/pdf", "report.pdf", testOutputDir)
+
+      const textContent = result.content[0] as { type: "text"; text: string }
+      const parsed = JSON.parse(textContent.text) as { savedTo: string; encoding: string; data: string }
+      expect(parsed.savedTo).toContain("report.pdf")
+      expect(parsed.encoding).toBe("base64")
+      expect(existsSync(parsed.savedTo)).toBe(true)
+
+      const savedContent = await readFile(parsed.savedTo)
+      expect(savedContent.toString()).toBe("%PDF-1.4 fake pdf content for testing")
+    })
+
+    it("should create nested output directory when saving", async () => {
       const nestedDir = join(testOutputDir, "nested", "deep")
       const pdfBuffer = Buffer.from("%PDF-1.4 test")
       const result = await processDownloadResponse(pdfBuffer, "application/pdf", "test.pdf", nestedDir)
 
       const textContent = result.content[0] as { type: "text"; text: string }
-      const parsed = JSON.parse(textContent.text) as { path: string }
-      expect(existsSync(parsed.path)).toBe(true)
-    })
-
-    it("should use default temp directory when no outputDir specified", async () => {
-      const pdfBuffer = Buffer.from("%PDF-1.4 test")
-      const result = await processDownloadResponse(pdfBuffer, "application/pdf", "default-dir-test.pdf")
-
-      const textContent = result.content[0] as { type: "text"; text: string }
-      const parsed = JSON.parse(textContent.text) as { path: string }
-      expect(parsed.path).toContain("microsoft-graph-downloads")
-      expect(existsSync(parsed.path)).toBe(true)
-
-      // Clean up the default temp file
-      await rm(parsed.path, { force: true })
+      const parsed = JSON.parse(textContent.text) as { savedTo: string }
+      expect(existsSync(parsed.savedTo)).toBe(true)
     })
   })
 })
