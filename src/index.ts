@@ -11,10 +11,17 @@ import { z } from "zod"
 import type { TokenManager } from "./auth/token-manager.js"
 import { createTokenManager } from "./auth/token-manager.js"
 import type { AuthMode, ServerConfig } from "./auth/types.js"
+import type { SiteCache } from "./cache/site-cache.js"
+import { createSiteCache } from "./cache/site-cache.js"
+import { buildSearchTool } from "./tools/sharepoint-search.js"
 
 export type { TokenManager } from "./auth/token-manager.js"
 export { createTokenManager } from "./auth/token-manager.js"
 export type { AuthMode, ServerConfig } from "./auth/types.js"
+export type { SiteCache, SiteInfo } from "./cache/site-cache.js"
+export { createSiteCache } from "./cache/site-cache.js"
+export type { SearchResult } from "./tools/sharepoint-search.js"
+export { buildSearchTool } from "./tools/sharepoint-search.js"
 
 export const DEFAULT_CLIENT_ID = "cf7d1f97-781e-4034-930c-abd420e12d49"
 export const GRAPH_BASE_URL = "https://graph.microsoft.com"
@@ -89,8 +96,11 @@ export function createServer(config: Readonly<ServerConfig>) {
   // Create token manager for client credentials mode
   const tokenManager: TokenManager | undefined = isClientCredentials ? createTokenManager(config) : undefined
 
+  // Create site cache for client credentials mode (used by SharePoint search fan-out)
+  const siteCache: SiteCache | undefined = isClientCredentials ? createSiteCache() : undefined
+
   const baseInstructions =
-    "Microsoft Graph MCP Server - Access Microsoft 365 data including users, mail, calendar, files, and more."
+    "Microsoft Graph MCP Server - Access Microsoft 365 data including users, mail, calendar, files, and more. Use sharepoint_search to find documents by keyword, then sharepoint_get_content to retrieve document text for analysis."
   const customInstructions = process.env.MCP_INSTRUCTIONS
   const instructions = customInstructions ? `${baseInstructions}\n\n${customInstructions}` : baseInstructions
 
@@ -310,18 +320,25 @@ export function createServer(config: Readonly<ServerConfig>) {
   server.addTool({
     name: "read_document",
     description:
-      "Download a file from SharePoint or OneDrive and return its readable text content. Supports DOCX, PDF, XLSX, and text-based files. Use this instead of download_file when you need to read document contents.",
+      "Download a file from SharePoint or OneDrive and return its readable text content. Supports DOCX, PDF, XLSX, and text-based files. Use this instead of download_file when you need to read document contents. Use with sharepoint_search results by constructing the path: /drives/{driveId}/items/{itemId}/content",
     parameters: z.object({
       path: z
         .string()
         .describe(
-          "Graph API path to the file content endpoint (e.g., /me/drive/items/{id}/content, /sites/{siteId}/drive/items/{id}/content, /me/drive/root:/Documents/report.pdf:/content)",
+          "Graph API path to the file content endpoint (e.g., /me/drive/items/{id}/content, /sites/{siteId}/drive/items/{id}/content, /drives/{driveId}/items/{itemId}/content, /me/drive/root:/Documents/report.pdf:/content)",
         ),
       apiVersion: z.enum(["v1.0", "beta"]).default("v1.0").describe("Graph API version"),
       format: z
         .string()
         .optional()
         .describe("Optional conversion format (e.g., 'pdf'). Only supported for certain file types."),
+      maxChars: z
+        .number()
+        .min(1000)
+        .max(200000)
+        .default(50000)
+        .optional()
+        .describe("Maximum characters to return (1000-200000). Content beyond this limit is truncated."),
     }),
     execute: async (args, { session, log }) => {
       const accessToken = await resolveAccessToken(session)
@@ -351,7 +368,20 @@ export function createServer(config: Readonly<ServerConfig>) {
       const resolvedFilename = filenameFromHeaders(response.headers) ?? filenameFromPath(args.path) ?? "download"
       const buffer = Buffer.from(await response.arrayBuffer())
 
-      const text = await extractTextFromBuffer(buffer, contentType, resolvedFilename)
+      const maxFileSize = 10 * 1024 * 1024 // 10 MB
+      if (buffer.length > maxFileSize) {
+        throw new Error(
+          `File too large (${formatBytes(buffer.length)}). Maximum supported size is ${formatBytes(maxFileSize)}.`,
+        )
+      }
+
+      const fullText = await extractTextFromBuffer(buffer, contentType, resolvedFilename)
+
+      const maxChars = args.maxChars ?? 50000
+      const text =
+        fullText.length > maxChars
+          ? `${fullText.slice(0, maxChars)}\n\n[truncated at ${maxChars.toLocaleString()} chars — full document is ${fullText.length.toLocaleString()} chars]`
+          : fullText
 
       return {
         content: [
@@ -364,7 +394,10 @@ export function createServer(config: Readonly<ServerConfig>) {
     },
   })
 
-  return { server, authProvider, tokenManager, config }
+  // SharePoint search tool
+  server.addTool(buildSearchTool(resolveAccessToken, config.authMode, siteCache))
+
+  return { server, authProvider, tokenManager, siteCache, config }
 }
 
 export const TEXT_MIME_PREFIXES = ["text/", "application/json", "application/xml", "application/csv"]
