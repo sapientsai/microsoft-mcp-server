@@ -174,7 +174,10 @@ export function createServer(config: Readonly<ServerConfig>) {
         .record(z.string(), z.string())
         .optional()
         .describe("OData query parameters ($select, $filter, $top, $orderby, etc.)"),
-      body: z.record(z.string(), z.unknown()).optional().describe("Request body for POST/PUT/PATCH operations"),
+      body: z
+        .union([z.record(z.string(), z.unknown()), z.string()])
+        .optional()
+        .describe("Request body for POST/PUT/PATCH operations"),
     }),
     execute: async (args, { session, log }) => {
       const accessToken = await resolveAccessToken(session)
@@ -194,7 +197,9 @@ export function createServer(config: Readonly<ServerConfig>) {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
-        ...(args.body && ["POST", "PUT", "PATCH"].includes(args.method) ? { body: JSON.stringify(args.body) } : {}),
+        ...(args.body && ["POST", "PUT", "PATCH"].includes(args.method)
+          ? { body: typeof args.body === "string" ? args.body : JSON.stringify(args.body) }
+          : {}),
       }
 
       const response = await fetch(url, fetchOptions)
