@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, writeFile } from "node:fs/promises"
 import { basename, extname, join } from "node:path"
 
 import ExcelJS from "exceljs"
@@ -101,9 +101,7 @@ export function createServer(config: Readonly<ServerConfig>) {
 
   const baseInstructions = `Microsoft Graph MCP Server - Access Microsoft 365 data including users, mail, calendar, files, and more. Use sharepoint_search to find documents by keyword, then sharepoint_get_content to retrieve document text for analysis.
 
-File Upload: For uploading files from the local environment to SharePoint/OneDrive, use the HTTP upload endpoint directly with curl:
-  curl -X PUT -H "Authorization: Bearer {api_key}" -H "Content-Type: {mime}" --data-binary @{local_file} "{server_base_url}/upload?path={graph_path}&conflictBehavior=rename"
-The upload_file tool also supports localPath (stdio mode), sourceUrl (fetch from URL), and content (small base64 files).`
+File Upload: To upload files to SharePoint/OneDrive, call the get_upload_config tool to get an authenticated curl command, then execute it with --data-binary @{local_file}. This bypasses MCP protocol limits and handles files of any size up to 250MB.`
   const customInstructions = process.env.MCP_INSTRUCTIONS
   const instructions = customInstructions ? `${baseInstructions}\n\n${customInstructions}` : baseInstructions
 
@@ -410,111 +408,57 @@ The upload_file tool also supports localPath (stdio mode), sourceUrl (fetch from
   })
 
   server.addTool({
-    name: "upload_file",
+    name: "get_upload_config",
     description:
-      "Upload a file to SharePoint or OneDrive via Microsoft Graph API. Supports simple upload (≤4MB) and chunked sessions (4MB–250MB). Requires Files.ReadWrite or Files.ReadWrite.All scope. Input modes: localPath (stdio/Desktop), sourceUrl (server-side fetch from URL), content (base64, small files only). For large files in cloud/httpStream mode, prefer the HTTP endpoint: PUT /upload?path={graphPath} with --data-binary.",
+      "Get the authenticated upload endpoint URL and curl command for uploading files to SharePoint/OneDrive. Call this tool first, then execute the returned curl command with --data-binary @{localFile} to upload. This bypasses MCP protocol limits and handles files up to 250MB.",
     parameters: z.object({
       path: z
         .string()
         .describe(
-          "Graph API destination path ending with :/content (e.g., /drives/{driveId}/root:/folder/file.docx:/content, /me/drive/root:/Documents/report.pdf:/content, /sites/{siteId}/drive/root:/folder/file.xlsx:/content)",
+          "Graph API destination path ending with :/content (e.g., /drives/{driveId}/root:/folder/file.docx:/content, /sites/{siteId}/drive/root:/folder/file.xlsx:/content)",
         ),
-      apiVersion: z.enum(["v1.0", "beta"]).default("v1.0").describe("Graph API version"),
-      localPath: z
+      localFile: z
         .string()
         .optional()
-        .describe(
-          "Absolute local file path. Works in stdio/Desktop mode. Mutually exclusive with content and sourceUrl.",
-        ),
-      content: z
-        .string()
-        .optional()
-        .describe(
-          "Base64-encoded file content. For small files only — large base64 strings get truncated in cloud mode. Mutually exclusive with localPath and sourceUrl.",
-        ),
-      sourceUrl: z
-        .string()
-        .optional()
-        .describe(
-          "URL to fetch file content from server-side. Bypasses base64 limits. Mutually exclusive with localPath and content.",
-        ),
+        .describe("Local file path to include in the curl example. If omitted, a placeholder is used."),
       contentType: z.string().optional().describe("MIME type override. Auto-detected from file extension if omitted."),
       conflictBehavior: z
         .enum(["rename", "replace", "fail"])
         .default("rename")
         .describe('Conflict behavior: "rename" (default) adds a suffix, "replace" overwrites, "fail" returns an error'),
     }),
-    execute: async (args, { session, log }) => {
-      const accessToken = await resolveAccessToken(session)
-
-      // Validate exactly one source
-      const sources = [args.localPath, args.content, args.sourceUrl].filter(Boolean)
-      if (sources.length !== 1) {
-        throw new Error("Provide exactly one of: localPath, content (base64), or sourceUrl.")
-      }
-
-      // Read file data
-      const readLocalFile = async (localPath: string): Promise<Buffer> => {
-        try {
-          return await readFile(localPath)
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-            throw new Error(
-              `File not found: ${localPath}. If this file is on a remote client, ` +
-                `the MCP server cannot access it directly. Upload via HTTP instead: ` +
-                `curl -X PUT --data-binary @"${localPath}" "${config.baseUrl}/upload?path=${encodeURIComponent(args.path)}&conflictBehavior=${args.conflictBehavior}"`,
-              { cause: err },
-            )
-          }
-          throw err
-        }
-      }
-
-      const buffer = args.localPath
-        ? await readLocalFile(args.localPath)
-        : args.content
-          ? Buffer.from(args.content, "base64")
-          : await fetchUrlToBuffer(args.sourceUrl!)
-
-      // Resolve filename
-      const filename =
-        filenameFromPath(args.path) ??
-        (args.localPath ? basename(args.localPath) : undefined) ??
-        (args.sourceUrl ? filenameFromUrl(args.sourceUrl) : undefined) ??
-        "upload"
-
-      // Resolve content type
+    // eslint-disable-next-line @typescript-eslint/require-await
+    execute: async (args) => {
+      const filename = filenameFromPath(args.path) ?? "upload"
       const contentType = resolveUploadContentType(args.contentType, filename)
+      const localFile = args.localFile ?? "{local_file_path}"
 
-      // Size guard
-      if (buffer.length > MAX_UPLOAD_SIZE) {
-        throw new Error(
-          `File too large (${formatBytes(buffer.length)}). Maximum upload size is ${formatBytes(MAX_UPLOAD_SIZE)}.`,
-        )
-      }
-
-      const apiBase = `${GRAPH_BASE_URL}/${args.apiVersion}`
-
-      log.info("Uploading file to Microsoft Graph", {
+      const params = new URLSearchParams({
         path: args.path,
-        filename,
-        size: buffer.length,
-        method: buffer.length <= SIMPLE_UPLOAD_LIMIT ? "simple" : "session",
+        conflictBehavior: args.conflictBehavior,
+        contentType,
       })
+      const uploadUrl = `${config.baseUrl}/upload?${params.toString()}`
 
-      const driveItem =
-        buffer.length <= SIMPLE_UPLOAD_LIMIT
-          ? await simpleUpload(apiBase, args.path, accessToken, buffer, contentType, args.conflictBehavior)
-          : await sessionUpload(apiBase, args.path, accessToken, buffer, args.conflictBehavior)
+      const authHeader = config.apiKey ? `Authorization: Bearer ${config.apiKey}` : undefined
+
+      const curlParts = [
+        "curl -X PUT",
+        authHeader ? `-H "${authHeader}"` : undefined,
+        `-H "Content-Type: ${contentType}"`,
+        `--data-binary @"${localFile}"`,
+        `"${uploadUrl}"`,
+      ]
+        .filter(Boolean)
+        .join(" \\\n  ")
 
       return JSON.stringify(
         {
-          id: driveItem.id,
-          name: driveItem.name,
-          size: driveItem.size,
-          webUrl: driveItem.webUrl,
-          createdDateTime: driveItem.createdDateTime,
-          lastModifiedDateTime: driveItem.lastModifiedDateTime,
+          uploadUrl,
+          method: "PUT",
+          contentType,
+          ...(authHeader ? { authHeader } : {}),
+          curl: curlParts,
         },
         null,
         2,
@@ -881,14 +825,6 @@ export async function parseGraphError(response: Response): Promise<string> {
 const SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024 // 4 MB
 const MAX_UPLOAD_SIZE = 250 * 1024 * 1024 // 250 MB
 const CHUNK_SIZE = 10 * 1024 * 1024 // 10 MB (must be multiple of 320 KiB)
-
-async function fetchUrlToBuffer(url: string): Promise<Buffer> {
-  const response = await fetch(url)
-  if (!response.ok) {
-    throw new Error(`Failed to fetch from sourceUrl: HTTP ${response.status} ${response.statusText}`)
-  }
-  return Buffer.from(await response.arrayBuffer())
-}
 
 export async function simpleUpload(
   apiBase: string,
