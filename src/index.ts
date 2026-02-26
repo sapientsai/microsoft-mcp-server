@@ -101,7 +101,9 @@ export function createServer(config: Readonly<ServerConfig>) {
 
   const baseInstructions = `Microsoft Graph MCP Server - Access Microsoft 365 data including users, mail, calendar, files, and more. Use sharepoint_search to find documents by keyword, then sharepoint_get_content to retrieve document text for analysis.
 
-File Upload: To upload files to SharePoint/OneDrive, call the get_upload_config tool to get an authenticated curl command, then execute it with --data-binary @{local_file}. This bypasses MCP protocol limits and handles files of any size up to 250MB.`
+File Upload: For uploading files from the local environment to SharePoint/OneDrive, use the HTTP upload endpoint directly with curl:
+  curl -X POST -H "Authorization: Bearer {api_key}" -H "Content-Type: {mime}" --data-binary @{local_file} "{server_base_url}/upload?path={graph_path}&conflictBehavior=rename"
+The get_upload_config tool also returns ready-to-run curl commands with authentication.`
   const customInstructions = process.env.MCP_INSTRUCTIONS
   const instructions = customInstructions ? `${baseInstructions}\n\n${customInstructions}` : baseInstructions
 
@@ -410,7 +412,7 @@ File Upload: To upload files to SharePoint/OneDrive, call the get_upload_config 
   server.addTool({
     name: "get_upload_config",
     description:
-      "Get the authenticated upload endpoint URL and curl command for uploading files to SharePoint/OneDrive. Call this tool first, then execute the returned curl command with --data-binary @{localFile} to upload. This bypasses MCP protocol limits and handles files up to 250MB.",
+      "Get the authenticated upload endpoint URL and curl command for uploading files to SharePoint/OneDrive. Call this tool first, then execute the returned curl command (POST with --data-binary) to upload. This bypasses MCP protocol limits and handles files up to 250MB.",
     parameters: z.object({
       path: z
         .string()
@@ -443,7 +445,7 @@ File Upload: To upload files to SharePoint/OneDrive, call the get_upload_config 
       const authHeader = config.apiKey ? `Authorization: Bearer ${config.apiKey}` : undefined
 
       const curlParts = [
-        "curl -X PUT",
+        "curl -X POST",
         authHeader ? `-H "${authHeader}"` : undefined,
         `-H "Content-Type: ${contentType}"`,
         `--data-binary @"${localFile}"`,
@@ -547,31 +549,36 @@ File Upload: To upload files to SharePoint/OneDrive, call the get_upload_config 
   server.addTool(buildSearchTool(resolveAccessToken, config.authMode, siteCache))
 
   // HTTP upload endpoint — bypasses MCP protocol for binary file uploads
-  // Used by Claude Container: curl --data-binary @file "https://server/upload?path=..."
+  // Accepts both POST and PUT for maximum compatibility with proxies and clients
+  // Used by Claude Container: curl -X POST --data-binary @file "https://server/upload?path=..."
   const app = server.getApp()
 
-  app.put("/upload", async (c) => {
+  const handleUpload = async (req: {
+    header: (name: string) => string | undefined
+    query: (name: string) => string | undefined
+    arrayBuffer: () => Promise<ArrayBuffer>
+  }) => {
     // Auth: require API key if configured
     if (config.apiKey) {
-      const authHeader = c.req.header("authorization")
+      const authHeader = req.header("authorization")
       const token = authHeader?.replace(/^Bearer\s+/i, "")
       if (token !== config.apiKey) {
-        return c.json({ error: "Unauthorized" }, 401)
+        return { status: 401 as const, body: { error: "Unauthorized" } }
       }
     }
 
     // Params
-    const path = c.req.query("path")
-    if (!path) return c.json({ error: "path query parameter is required" }, 400)
-    const apiVersion = c.req.query("apiVersion") ?? "v1.0"
-    const conflictBehavior = c.req.query("conflictBehavior") ?? "rename"
-    const explicitContentType = c.req.query("contentType")
+    const path = req.query("path")
+    if (!path) return { status: 400 as const, body: { error: "path query parameter is required" } }
+    const apiVersion = req.query("apiVersion") ?? "v1.0"
+    const conflictBehavior = req.query("conflictBehavior") ?? "rename"
+    const explicitContentType = req.query("contentType")
 
     // Read binary body
-    const arrayBuffer = await c.req.arrayBuffer()
+    const arrayBuffer = await req.arrayBuffer()
     const buffer = Buffer.from(arrayBuffer)
-    if (buffer.length === 0) return c.json({ error: "Empty request body" }, 400)
-    if (buffer.length > MAX_UPLOAD_SIZE) return c.json({ error: "File too large (max 250MB)" }, 413)
+    if (buffer.length === 0) return { status: 400 as const, body: { error: "Empty request body" } }
+    if (buffer.length > MAX_UPLOAD_SIZE) return { status: 413 as const, body: { error: "File too large (max 250MB)" } }
 
     // Resolve
     const accessToken = await resolveAccessToken(undefined)
@@ -584,7 +591,27 @@ File Upload: To upload files to SharePoint/OneDrive, call the get_upload_config 
         ? await simpleUpload(apiBase, path, accessToken, buffer, contentType, conflictBehavior)
         : await sessionUpload(apiBase, path, accessToken, buffer, conflictBehavior)
 
-    return c.json(driveItem)
+    return { status: 200 as const, body: driveItem }
+  }
+
+  app.post("/upload", async (c) => {
+    try {
+      const result = await handleUpload(c.req)
+      return c.json(result.body, result.status)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error"
+      return c.json({ error: message }, 500)
+    }
+  })
+
+  app.put("/upload", async (c) => {
+    try {
+      const result = await handleUpload(c.req)
+      return c.json(result.body, result.status)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error"
+      return c.json({ error: message }, 500)
+    }
   })
 
   return { server, authProvider, tokenManager, siteCache, config }
