@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { z } from "zod"
 
-import { filenameFromPath, parseGraphError, resolveUploadContentType } from "../src/index.js"
+import { filenameFromPath, filenameFromUrl, parseGraphError, resolveUploadContentType } from "../src/index.js"
 
 /**
  * The upload_file parameter schema — mirrors src/index.ts.
@@ -11,6 +11,7 @@ const uploadSchema = z.object({
   apiVersion: z.enum(["v1.0", "beta"]).default("v1.0"),
   localPath: z.string().optional(),
   content: z.string().optional(),
+  sourceUrl: z.string().optional(),
   contentType: z.string().optional(),
   conflictBehavior: z.enum(["rename", "replace", "fail"]).default("rename"),
 })
@@ -52,10 +53,29 @@ describe("upload_file", () => {
       expect(result.success).toBe(true)
     })
 
+    it("should accept sourceUrl only", () => {
+      const result = uploadSchema.safeParse({
+        path: "/drives/driveId/root:/folder/file.pdf:/content",
+        sourceUrl: "https://example.com/files/report.pdf",
+      })
+      expect(result.success).toBe(true)
+    })
+
     it("should accept neither (schema allows; runtime rejects)", () => {
       const result = uploadSchema.safeParse({
         path: "/drives/driveId/root:/folder/file.pdf:/content",
       })
+      expect(result.success).toBe(true)
+    })
+
+    it("should accept all three (schema allows; runtime rejects with exactly-one-of)", () => {
+      const result = uploadSchema.safeParse({
+        path: "/drives/driveId/root:/folder/file.pdf:/content",
+        localPath: "/tmp/file.pdf",
+        content: "dGVzdA==",
+        sourceUrl: "https://example.com/file.pdf",
+      })
+      // Schema-level all are optional, runtime logic rejects when count !== 1
       expect(result.success).toBe(true)
     })
 
@@ -217,6 +237,51 @@ describe("upload_file", () => {
 
     it("should reject >250MB", () => {
       expect(classifyUploadMethod(MAX_UPLOAD_SIZE + 1)).toBe("rejected")
+    })
+  })
+
+  describe("filenameFromUrl", () => {
+    it("should extract filename from URL path", () => {
+      expect(filenameFromUrl("https://example.com/files/report.pdf")).toBe("report.pdf")
+    })
+
+    it("should extract filename from URL with query string", () => {
+      expect(filenameFromUrl("https://example.com/files/doc.docx?token=abc")).toBe("doc.docx")
+    })
+
+    it("should decode URL-encoded filenames", () => {
+      expect(filenameFromUrl("https://example.com/files/my%20report.pdf")).toBe("my report.pdf")
+    })
+
+    it("should return undefined for root-only URLs", () => {
+      expect(filenameFromUrl("https://example.com/")).toBeUndefined()
+    })
+
+    it("should return undefined for invalid URLs", () => {
+      expect(filenameFromUrl("not-a-url")).toBeUndefined()
+    })
+
+    it("should handle deeply nested paths", () => {
+      expect(filenameFromUrl("https://cdn.example.com/a/b/c/d/file.xlsx")).toBe("file.xlsx")
+    })
+  })
+
+  describe("ENOENT fallback message", () => {
+    it("should include curl instructions when file not found", () => {
+      const localPath = "/mnt/user-data/uploads/doc.docx"
+      const graphPath = "/drives/driveId/root:/folder/doc.docx:/content"
+      const baseUrl = "https://ms-mcp.example.com"
+      const conflictBehavior = "rename"
+
+      const errorMessage =
+        `File not found: ${localPath}. If this file is on a remote client, ` +
+        `the MCP server cannot access it directly. Upload via HTTP instead: ` +
+        `curl -X PUT --data-binary @"${localPath}" "${baseUrl}/upload?path=${encodeURIComponent(graphPath)}&conflictBehavior=${conflictBehavior}"`
+
+      expect(errorMessage).toContain("File not found:")
+      expect(errorMessage).toContain("curl -X PUT --data-binary")
+      expect(errorMessage).toContain("/upload?path=")
+      expect(errorMessage).toContain("conflictBehavior=rename")
     })
   })
 
