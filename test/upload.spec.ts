@@ -4,14 +4,11 @@ import { z } from "zod"
 import { filenameFromPath, filenameFromUrl, parseGraphError, resolveUploadContentType } from "../src/index.js"
 
 /**
- * The upload_file parameter schema — mirrors src/index.ts.
+ * The get_upload_config parameter schema — mirrors src/index.ts.
  */
-const uploadSchema = z.object({
+const uploadConfigSchema = z.object({
   path: z.string(),
-  apiVersion: z.enum(["v1.0", "beta"]).default("v1.0"),
-  localPath: z.string().optional(),
-  content: z.string().optional(),
-  sourceUrl: z.string().optional(),
+  localFile: z.string().optional(),
   contentType: z.string().optional(),
   conflictBehavior: z.enum(["rename", "replace", "fail"]).default("rename"),
 })
@@ -25,64 +22,34 @@ function classifyUploadMethod(size: number): "simple" | "session" | "rejected" {
   return "session"
 }
 
-describe("upload_file", () => {
-  describe("schema validation", () => {
-    it("should accept localPath only", () => {
-      const result = uploadSchema.safeParse({
-        path: "/drives/driveId/root:/folder/file.pdf:/content",
-        localPath: "/tmp/file.pdf",
-      })
-      expect(result.success).toBe(true)
-    })
-
-    it("should accept content only", () => {
-      const result = uploadSchema.safeParse({
-        path: "/drives/driveId/root:/folder/file.pdf:/content",
-        content: "dGVzdA==",
-      })
-      expect(result.success).toBe(true)
-    })
-
-    it("should accept both (schema allows; runtime rejects)", () => {
-      const result = uploadSchema.safeParse({
-        path: "/drives/driveId/root:/folder/file.pdf:/content",
-        localPath: "/tmp/file.pdf",
-        content: "dGVzdA==",
-      })
-      // Schema-level both are optional, runtime logic rejects
-      expect(result.success).toBe(true)
-    })
-
-    it("should accept sourceUrl only", () => {
-      const result = uploadSchema.safeParse({
-        path: "/drives/driveId/root:/folder/file.pdf:/content",
-        sourceUrl: "https://example.com/files/report.pdf",
-      })
-      expect(result.success).toBe(true)
-    })
-
-    it("should accept neither (schema allows; runtime rejects)", () => {
-      const result = uploadSchema.safeParse({
+describe("upload", () => {
+  describe("get_upload_config schema", () => {
+    it("should accept path only", () => {
+      const result = uploadConfigSchema.safeParse({
         path: "/drives/driveId/root:/folder/file.pdf:/content",
       })
       expect(result.success).toBe(true)
     })
 
-    it("should accept all three (schema allows; runtime rejects with exactly-one-of)", () => {
-      const result = uploadSchema.safeParse({
+    it("should accept path with localFile", () => {
+      const result = uploadConfigSchema.safeParse({
         path: "/drives/driveId/root:/folder/file.pdf:/content",
-        localPath: "/tmp/file.pdf",
-        content: "dGVzdA==",
-        sourceUrl: "https://example.com/file.pdf",
+        localFile: "/mnt/user-data/uploads/file.pdf",
       })
-      // Schema-level all are optional, runtime logic rejects when count !== 1
+      expect(result.success).toBe(true)
+    })
+
+    it("should accept path with contentType override", () => {
+      const result = uploadConfigSchema.safeParse({
+        path: "/drives/driveId/root:/folder/file.pdf:/content",
+        contentType: "application/pdf",
+      })
       expect(result.success).toBe(true)
     })
 
     it("should default conflictBehavior to rename", () => {
-      const result = uploadSchema.safeParse({
+      const result = uploadConfigSchema.safeParse({
         path: "/drives/driveId/root:/folder/file.pdf:/content",
-        content: "dGVzdA==",
       })
       expect(result.success).toBe(true)
       if (result.success) {
@@ -91,9 +58,8 @@ describe("upload_file", () => {
     })
 
     it("should accept replace conflictBehavior", () => {
-      const result = uploadSchema.safeParse({
+      const result = uploadConfigSchema.safeParse({
         path: "/drives/driveId/root:/folder/file.pdf:/content",
-        content: "dGVzdA==",
         conflictBehavior: "replace",
       })
       expect(result.success).toBe(true)
@@ -103,9 +69,8 @@ describe("upload_file", () => {
     })
 
     it("should accept fail conflictBehavior", () => {
-      const result = uploadSchema.safeParse({
+      const result = uploadConfigSchema.safeParse({
         path: "/drives/driveId/root:/folder/file.pdf:/content",
-        content: "dGVzdA==",
         conflictBehavior: "fail",
       })
       expect(result.success).toBe(true)
@@ -115,35 +80,16 @@ describe("upload_file", () => {
     })
 
     it("should reject invalid conflictBehavior", () => {
-      const result = uploadSchema.safeParse({
+      const result = uploadConfigSchema.safeParse({
         path: "/drives/driveId/root:/folder/file.pdf:/content",
-        content: "dGVzdA==",
         conflictBehavior: "skip",
       })
       expect(result.success).toBe(false)
     })
 
-    it("should default apiVersion to v1.0", () => {
-      const result = uploadSchema.safeParse({
-        path: "/drives/driveId/root:/folder/file.pdf:/content",
-        content: "dGVzdA==",
-      })
-      expect(result.success).toBe(true)
-      if (result.success) {
-        expect(result.data.apiVersion).toBe("v1.0")
-      }
-    })
-
-    it("should accept beta apiVersion", () => {
-      const result = uploadSchema.safeParse({
-        path: "/drives/driveId/root:/folder/file.pdf:/content",
-        content: "dGVzdA==",
-        apiVersion: "beta",
-      })
-      expect(result.success).toBe(true)
-      if (result.success) {
-        expect(result.data.apiVersion).toBe("beta")
-      }
+    it("should require path", () => {
+      const result = uploadConfigSchema.safeParse({})
+      expect(result.success).toBe(false)
     })
   })
 
@@ -263,25 +209,6 @@ describe("upload_file", () => {
 
     it("should handle deeply nested paths", () => {
       expect(filenameFromUrl("https://cdn.example.com/a/b/c/d/file.xlsx")).toBe("file.xlsx")
-    })
-  })
-
-  describe("ENOENT fallback message", () => {
-    it("should include curl instructions when file not found", () => {
-      const localPath = "/mnt/user-data/uploads/doc.docx"
-      const graphPath = "/drives/driveId/root:/folder/doc.docx:/content"
-      const baseUrl = "https://ms-mcp.example.com"
-      const conflictBehavior = "rename"
-
-      const errorMessage =
-        `File not found: ${localPath}. If this file is on a remote client, ` +
-        `the MCP server cannot access it directly. Upload via HTTP instead: ` +
-        `curl -X PUT --data-binary @"${localPath}" "${baseUrl}/upload?path=${encodeURIComponent(graphPath)}&conflictBehavior=${conflictBehavior}"`
-
-      expect(errorMessage).toContain("File not found:")
-      expect(errorMessage).toContain("curl -X PUT --data-binary")
-      expect(errorMessage).toContain("/upload?path=")
-      expect(errorMessage).toContain("conflictBehavior=rename")
     })
   })
 
