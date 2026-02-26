@@ -102,7 +102,7 @@ export function createServer(config: Readonly<ServerConfig>) {
   const baseInstructions = `Microsoft Graph MCP Server - Access Microsoft 365 data including users, mail, calendar, files, and more. Use sharepoint_search to find documents by keyword, then sharepoint_get_content to retrieve document text for analysis.
 
 File Upload: For uploading files from the local environment to SharePoint/OneDrive, use the HTTP upload endpoint directly with curl:
-  curl -X POST -H "Authorization: Bearer {api_key}" -H "Content-Type: {mime}" --data-binary @{local_file} "{server_base_url}/upload?path={graph_path}&conflictBehavior=rename"
+  base64 -i {local_file} | curl -X POST -H "Authorization: Bearer {api_key}" -H "Content-Type: text/plain" --data-binary @- "{server_base_url}/upload?path={graph_path}&conflictBehavior=rename&encoding=base64"
 The get_upload_config tool also returns ready-to-run curl commands with authentication.`
   const customInstructions = process.env.MCP_INSTRUCTIONS
   const instructions = customInstructions ? `${baseInstructions}\n\n${customInstructions}` : baseInstructions
@@ -439,16 +439,18 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
         path: args.path,
         conflictBehavior: args.conflictBehavior,
         contentType,
+        encoding: "base64",
       })
       const uploadUrl = `${config.baseUrl}/upload?${params.toString()}`
 
       const authHeader = config.apiKey ? `Authorization: Bearer ${config.apiKey}` : undefined
 
       const curlParts = [
-        "curl -X POST",
+        `base64 -i "${localFile}"`,
+        "| curl -X POST",
         authHeader ? `-H "${authHeader}"` : undefined,
-        `-H "Content-Type: ${contentType}"`,
-        `--data-binary @"${localFile}"`,
+        `-H "Content-Type: text/plain"`,
+        `--data-binary @-`,
         `"${uploadUrl}"`,
       ]
         .filter(Boolean)
@@ -574,10 +576,13 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
     const conflictBehavior = req.query("conflictBehavior") ?? "rename"
     const explicitContentType = req.query("contentType")
 
-    // Read binary body
+    // Read body — decode base64 if encoding=base64 (workaround for reverse proxies rejecting binary bodies)
+    const encoding = req.query("encoding")
     const arrayBuffer = await req.arrayBuffer()
-    const buffer = Buffer.from(arrayBuffer)
-    if (buffer.length === 0) return { status: 400 as const, body: { error: "Empty request body" } }
+    const rawBuffer = Buffer.from(arrayBuffer)
+    if (rawBuffer.length === 0) return { status: 400 as const, body: { error: "Empty request body" } }
+    const buffer = encoding === "base64" ? Buffer.from(rawBuffer.toString("utf-8").trim(), "base64") : rawBuffer
+    if (buffer.length === 0) return { status: 400 as const, body: { error: "Invalid base64 content" } }
     if (buffer.length > MAX_UPLOAD_SIZE) return { status: 413 as const, body: { error: "File too large (max 250MB)" } }
 
     // Resolve
