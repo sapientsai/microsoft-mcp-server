@@ -220,6 +220,90 @@ export function createServer(config: Readonly<ServerConfig>) {
   })
 
   server.addTool({
+    name: "microsoft_graph_batch",
+    description:
+      "Execute multiple Microsoft Graph API requests in a single batch call (max 20). Use this for bulk operations like creating folder trees, sending multiple requests, or any scenario requiring many Graph API calls. Individual request failures don't fail the batch — each response has its own status code.",
+    parameters: z.object({
+      requests: z
+        .array(
+          z.object({
+            id: z.string().describe("Unique ID to correlate with response"),
+            method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).describe("HTTP method"),
+            url: z.string().describe("Relative API path (e.g., /me/drive/root/children)"),
+            headers: z
+              .record(z.string(), z.string())
+              .optional()
+              .describe("Request headers. Content-Type is auto-added for requests with a body"),
+            body: z
+              .union([z.record(z.string(), z.unknown()), z.string()])
+              .optional()
+              .describe("Request body for POST/PUT/PATCH"),
+            dependsOn: z.array(z.string()).optional().describe("IDs of requests that must complete before this one"),
+          }),
+        )
+        .min(1)
+        .max(20)
+        .describe("Array of requests (max 20)"),
+      apiVersion: z.enum(["v1.0", "beta"]).default("v1.0").describe("Graph API version"),
+    }),
+    execute: async (args, { session, log }) => {
+      const accessToken = await resolveAccessToken(session)
+
+      const batchRequests = args.requests.map((req) => {
+        const normalized: Record<string, unknown> = {
+          id: req.id,
+          method: req.method,
+          url: req.url,
+        }
+
+        if (req.body !== undefined) {
+          // Parse string bodies into objects — Graph batch expects JSON objects, not stringified JSON
+          normalized.body = typeof req.body === "string" ? JSON.parse(req.body) : req.body
+
+          // Auto-add Content-Type header for requests with a body
+          const headers = req.headers ? { ...req.headers } : {}
+          if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
+            headers["Content-Type"] = "application/json"
+          }
+          normalized.headers = headers
+        } else if (req.headers) {
+          normalized.headers = req.headers
+        }
+
+        if (req.dependsOn && req.dependsOn.length > 0) {
+          normalized.dependsOn = req.dependsOn
+        }
+
+        return normalized
+      })
+
+      const url = `${GRAPH_BASE_URL}/${args.apiVersion}/$batch`
+      log.info("Calling Microsoft Graph Batch API", { url, requestCount: batchRequests.length })
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ requests: batchRequests }),
+      })
+
+      const data: unknown = await response.json()
+
+      if (!response.ok) {
+        const errorMessage =
+          typeof data === "object" && data !== null && "error" in data
+            ? (data as { error: { message?: string } }).error.message
+            : `HTTP ${response.status}: ${response.statusText}`
+        throw new Error(errorMessage ?? `Batch request failed with status ${response.status}`)
+      }
+
+      return JSON.stringify(data, null, 2)
+    },
+  })
+
+  server.addTool({
     name: "get_auth_status",
     description: "Check the current authentication status.",
     parameters: z.object({}),
