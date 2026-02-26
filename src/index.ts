@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { basename, extname, join } from "node:path"
 
 import ExcelJS from "exceljs"
@@ -407,6 +407,87 @@ export function createServer(config: Readonly<ServerConfig>) {
   })
 
   server.addTool({
+    name: "upload_file",
+    description:
+      "Upload a file to SharePoint or OneDrive via Microsoft Graph API. Supports simple upload (≤4MB) and chunked upload sessions (4MB–250MB). Requires Files.ReadWrite or Files.ReadWrite.All scope. In stdio/Desktop mode, use localPath to read from the local filesystem. In httpStream/Cloud mode, use content to pass base64-encoded file data.",
+    parameters: z.object({
+      path: z
+        .string()
+        .describe(
+          "Graph API destination path ending with :/content (e.g., /drives/{driveId}/root:/folder/file.docx:/content, /me/drive/root:/Documents/report.pdf:/content, /sites/{siteId}/drive/root:/folder/file.xlsx:/content)",
+        ),
+      apiVersion: z.enum(["v1.0", "beta"]).default("v1.0").describe("Graph API version"),
+      localPath: z
+        .string()
+        .optional()
+        .describe("Absolute local file path. Works in stdio/Desktop mode. Mutually exclusive with content."),
+      content: z
+        .string()
+        .optional()
+        .describe("Base64-encoded file content. Works universally. Mutually exclusive with localPath."),
+      contentType: z.string().optional().describe("MIME type override. Auto-detected from file extension if omitted."),
+      conflictBehavior: z
+        .enum(["rename", "replace", "fail"])
+        .default("rename")
+        .describe('Conflict behavior: "rename" (default) adds a suffix, "replace" overwrites, "fail" returns an error'),
+    }),
+    execute: async (args, { session, log }) => {
+      const accessToken = await resolveAccessToken(session)
+
+      // Validate exactly one source
+      if (args.localPath && args.content) {
+        throw new Error("Provide either localPath or content, not both.")
+      }
+      if (!args.localPath && !args.content) {
+        throw new Error("Provide either localPath (for local files) or content (base64-encoded).")
+      }
+
+      // Read file data
+      const buffer = args.localPath ? await readFile(args.localPath) : Buffer.from(args.content!, "base64")
+
+      // Resolve filename
+      const filename = filenameFromPath(args.path) ?? (args.localPath ? basename(args.localPath) : "upload")
+
+      // Resolve content type
+      const contentType = resolveUploadContentType(args.contentType, filename)
+
+      // Size guard
+      if (buffer.length > MAX_UPLOAD_SIZE) {
+        throw new Error(
+          `File too large (${formatBytes(buffer.length)}). Maximum upload size is ${formatBytes(MAX_UPLOAD_SIZE)}.`,
+        )
+      }
+
+      const apiBase = `${GRAPH_BASE_URL}/${args.apiVersion}`
+
+      log.info("Uploading file to Microsoft Graph", {
+        path: args.path,
+        filename,
+        size: buffer.length,
+        method: buffer.length <= SIMPLE_UPLOAD_LIMIT ? "simple" : "session",
+      })
+
+      const driveItem =
+        buffer.length <= SIMPLE_UPLOAD_LIMIT
+          ? await simpleUpload(apiBase, args.path, accessToken, buffer, contentType, args.conflictBehavior)
+          : await sessionUpload(apiBase, args.path, accessToken, buffer, args.conflictBehavior)
+
+      return JSON.stringify(
+        {
+          id: driveItem.id,
+          name: driveItem.name,
+          size: driveItem.size,
+          webUrl: driveItem.webUrl,
+          createdDateTime: driveItem.createdDateTime,
+          lastModifiedDateTime: driveItem.lastModifiedDateTime,
+        },
+        null,
+        2,
+      )
+    },
+  })
+
+  server.addTool({
     name: "read_document",
     description:
       "Download a file from SharePoint or OneDrive and return its readable text content. Supports DOCX, PDF, XLSX, and text-based files. Use this instead of download_file when you need to read document contents. Use with sharepoint_search results by constructing the path: /drives/{driveId}/items/{itemId}/content",
@@ -594,6 +675,24 @@ const CONTENT_TYPE_MAP: Record<string, string> = {
   ".pdf": "application/pdf",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".doc": "application/msword",
+  ".xls": "application/vnd.ms-excel",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".txt": "text/plain",
+  ".csv": "text/csv",
+  ".json": "application/json",
+  ".xml": "application/xml",
+  ".html": "text/html",
+  ".htm": "text/html",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".zip": "application/zip",
+  ".mp4": "video/mp4",
+  ".mp3": "audio/mpeg",
 }
 
 export const EXTRACTABLE_TYPES = [
@@ -660,6 +759,135 @@ export async function extractTextFromBuffer(buffer: Buffer, contentType: string,
 
   const supported = [...EXTRACTABLE_TYPES, "text/*"].join(", ")
   throw new Error(`Unsupported content type "${contentType}" for text extraction. Supported: ${supported}`)
+}
+
+// --- Upload helpers ---
+
+export type DriveItemResponse = {
+  id: string
+  name: string
+  size: number
+  webUrl: string
+  createdDateTime?: string
+  lastModifiedDateTime?: string
+  file?: { mimeType: string }
+  parentReference?: { driveId: string; path: string }
+}
+
+export function resolveUploadContentType(explicit: string | undefined, filename: string): string {
+  if (explicit) return explicit
+  const ext = extname(filename).toLowerCase()
+  return CONTENT_TYPE_MAP[ext] ?? "application/octet-stream"
+}
+
+export async function parseGraphError(response: Response): Promise<string> {
+  try {
+    const data = (await response.json()) as { error?: { message?: string; code?: string } }
+    if (data.error?.message) {
+      return data.error.code ? `${data.error.code}: ${data.error.message}` : data.error.message
+    }
+  } catch {
+    // Not JSON — fall through
+  }
+  return `HTTP ${response.status}: ${response.statusText}`
+}
+
+const SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024 // 4 MB
+const MAX_UPLOAD_SIZE = 250 * 1024 * 1024 // 250 MB
+const CHUNK_SIZE = 10 * 1024 * 1024 // 10 MB (must be multiple of 320 KiB)
+
+export async function simpleUpload(
+  apiBase: string,
+  path: string,
+  accessToken: string,
+  buffer: Buffer,
+  contentType: string,
+  conflictBehavior: string,
+): Promise<DriveItemResponse> {
+  const separator = path.includes("?") ? "&" : "?"
+  const url = `${apiBase}${path}${separator}@microsoft.graph.conflictBehavior=${conflictBehavior}`
+
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": contentType,
+      "Content-Length": String(buffer.length),
+    },
+    body: new Uint8Array(buffer),
+  })
+
+  if (!response.ok) {
+    const message = await parseGraphError(response)
+    throw new Error(message)
+  }
+
+  return (await response.json()) as DriveItemResponse
+}
+
+export async function sessionUpload(
+  apiBase: string,
+  path: string,
+  accessToken: string,
+  buffer: Buffer,
+  conflictBehavior: string,
+): Promise<DriveItemResponse> {
+  // The path ends with :/content — replace :/content with :/createUploadSession
+  const sessionPath = path.replace(/:\/?content$/i, ":/createUploadSession")
+  const sessionUrl = `${apiBase}${sessionPath}`
+
+  const createResponse = await fetch(sessionUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      item: { "@microsoft.graph.conflictBehavior": conflictBehavior },
+    }),
+  })
+
+  if (!createResponse.ok) {
+    const message = await parseGraphError(createResponse)
+    throw new Error(`Failed to create upload session: ${message}`)
+  }
+
+  const session = (await createResponse.json()) as { uploadUrl: string }
+
+  return uploadChunks(session.uploadUrl, buffer, 0)
+}
+
+async function uploadChunks(uploadUrl: string, buffer: Buffer, offset: number): Promise<DriveItemResponse> {
+  const totalSize = buffer.length
+  if (offset >= totalSize) {
+    throw new Error("Upload completed but no DriveItem response received")
+  }
+
+  const end = Math.min(offset + CHUNK_SIZE, totalSize)
+  const chunk = buffer.subarray(offset, end)
+
+  const chunkResponse = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Length": String(chunk.length),
+      "Content-Range": `bytes ${offset}-${end - 1}/${totalSize}`,
+    },
+    body: new Uint8Array(chunk),
+  })
+
+  if (!chunkResponse.ok) {
+    // Cancel the upload session on failure
+    await fetch(uploadUrl, { method: "DELETE" }).catch(() => {})
+    const message = await parseGraphError(chunkResponse)
+    throw new Error(`Upload chunk failed at byte ${offset}: ${message}`)
+  }
+
+  // The final chunk returns the DriveItem; intermediate chunks return 202
+  if (chunkResponse.status === 200 || chunkResponse.status === 201) {
+    return (await chunkResponse.json()) as DriveItemResponse
+  }
+
+  return uploadChunks(uploadUrl, buffer, offset + CHUNK_SIZE)
 }
 
 export async function runServer(): Promise<void> {
