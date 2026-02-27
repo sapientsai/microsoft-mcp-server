@@ -102,7 +102,7 @@ export function createServer(config: Readonly<ServerConfig>) {
   const baseInstructions = `Microsoft Graph MCP Server - Access Microsoft 365 data including users, mail, calendar, files, and more. Use sharepoint_search to find documents by keyword, then sharepoint_get_content to retrieve document text for analysis.
 
 File Upload: For uploading files from the local environment to SharePoint/OneDrive, use the HTTP upload endpoint directly with curl:
-  base64 -i {local_file} | curl -X POST -H "Authorization: Bearer {api_key}" -H "Content-Type: text/plain" --data-binary @- "{server_base_url}/upload?path={graph_path}&conflictBehavior=rename&encoding=base64"
+  base64 {local_file} | tr -d '\\n' | curl -X POST -H "Authorization: Bearer {api_key}" -H "Content-Type: text/plain" --data-binary @- "{server_base_url}/upload?path={graph_path}&conflictBehavior=rename&encoding=base64"
 The get_upload_config tool also returns ready-to-run curl commands with authentication.`
   const customInstructions = process.env.MCP_INSTRUCTIONS
   const instructions = customInstructions ? `${baseInstructions}\n\n${customInstructions}` : baseInstructions
@@ -446,7 +446,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
       const authHeader = config.apiKey ? `Authorization: Bearer ${config.apiKey}` : undefined
 
       const curlParts = [
-        `base64 -i "${localFile}"`,
+        `base64 "${localFile}" | tr -d '\\n'`,
         "| curl -X POST",
         authHeader ? `-H "${authHeader}"` : undefined,
         `-H "Content-Type: text/plain"`,
@@ -581,7 +581,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
     const arrayBuffer = await req.arrayBuffer()
     const rawBuffer = Buffer.from(arrayBuffer)
     if (rawBuffer.length === 0) return { status: 400 as const, body: { error: "Empty request body" } }
-    const buffer = encoding === "base64" ? Buffer.from(rawBuffer.toString("utf-8").trim(), "base64") : rawBuffer
+    const buffer = encoding === "base64" ? decodeBase64Upload(rawBuffer) : rawBuffer
     if (buffer.length === 0) return { status: 400 as const, body: { error: "Invalid base64 content" } }
     if (buffer.length > MAX_UPLOAD_SIZE) return { status: 413 as const, body: { error: "File too large (max 250MB)" } }
 
@@ -824,6 +824,10 @@ export async function extractTextFromBuffer(buffer: Buffer, contentType: string,
 }
 
 // --- Upload helpers ---
+
+export function decodeBase64Upload(rawBuffer: Buffer): Buffer {
+  return Buffer.from(rawBuffer.toString("utf-8").replace(/\s/g, ""), "base64")
+}
 
 export type DriveItemResponse = {
   id: string
