@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest"
 import { z } from "zod"
 
-import { filenameFromPath, filenameFromUrl, parseGraphError, resolveUploadContentType } from "../src/index.js"
+import {
+  decodeBase64Upload,
+  filenameFromPath,
+  filenameFromUrl,
+  parseGraphError,
+  resolveUploadContentType,
+} from "../src/index.js"
 
 /**
  * The get_upload_config parameter schema — mirrors src/index.ts.
@@ -212,6 +218,61 @@ describe("upload", () => {
     })
   })
 
+  describe("base64 decoding (cross-platform)", () => {
+    it("should decode clean base64 (no wrapping)", () => {
+      const original = "Hello, world!"
+      const encoded = Buffer.from(original).toString("base64")
+      const result = decodeBase64Upload(Buffer.from(encoded))
+      expect(result.toString("utf-8")).toBe(original)
+    })
+
+    it("should decode LF-wrapped base64 (Linux default, 76-char lines)", () => {
+      const original = "The quick brown fox jumps over the lazy dog. ".repeat(10)
+      const encoded = Buffer.from(original).toString("base64")
+      // Simulate Linux base64 wrapping at 76 characters
+      const wrapped = encoded.replace(/(.{76})/g, "$1\n")
+      const result = decodeBase64Upload(Buffer.from(wrapped))
+      expect(result.toString("utf-8")).toBe(original)
+    })
+
+    it("should decode CRLF-wrapped base64 (Windows)", () => {
+      const original = "Windows line endings test content here"
+      const encoded = Buffer.from(original).toString("base64")
+      const wrapped = encoded.replace(/(.{76})/g, "$1\r\n")
+      const result = decodeBase64Upload(Buffer.from(wrapped))
+      expect(result.toString("utf-8")).toBe(original)
+    })
+
+    it("should decode base64 with trailing newline", () => {
+      const original = "trailing newline"
+      const encoded = Buffer.from(original).toString("base64") + "\n"
+      const result = decodeBase64Upload(Buffer.from(encoded))
+      expect(result.toString("utf-8")).toBe(original)
+    })
+
+    it("should decode base64 with leading/trailing whitespace", () => {
+      const original = "whitespace padded"
+      const encoded = `  ${Buffer.from(original).toString("base64")}  \n`
+      const result = decodeBase64Upload(Buffer.from(encoded))
+      expect(result.toString("utf-8")).toBe(original)
+    })
+
+    it("should return empty buffer for empty base64 after stripping", () => {
+      const result = decodeBase64Upload(Buffer.from("  \n\r\n  "))
+      expect(result.length).toBe(0)
+    })
+
+    it("should correctly round-trip binary content with wrapping", () => {
+      // Create binary content with null bytes and high bytes
+      const binary = Buffer.from([0x00, 0x01, 0xff, 0xfe, 0x80, 0x7f, 0x00, 0xab, 0xcd, 0xef])
+      const encoded = binary.toString("base64")
+      // Wrap at 76 chars (simulating Linux base64 output)
+      const wrapped = encoded.replace(/(.{76})/g, "$1\n")
+      const result = decodeBase64Upload(Buffer.from(wrapped))
+      expect(result).toEqual(binary)
+    })
+  })
+
   describe("parseGraphError", () => {
     it("should extract error message from JSON response", async () => {
       const response = new Response(JSON.stringify({ error: { code: "accessDenied", message: "Access denied" } }), {
@@ -250,6 +311,37 @@ describe("upload", () => {
       })
       const message = await parseGraphError(response)
       expect(message).toBe("HTTP 400: Bad Request")
+    })
+  })
+
+  describe("get_upload_config curl template", () => {
+    it("should use cross-platform base64 command (not macOS-only base64 -i)", () => {
+      // Simulate what createServer's get_upload_config tool generates
+      const localFile = "/mnt/data/report.pdf"
+      const curlParts = [
+        `base64 "${localFile}" | tr -d '\\n'`,
+        "| curl -X POST",
+        `-H "Content-Type: text/plain"`,
+        `--data-binary @-`,
+        `"https://example.com/upload?path=/drives/d/root:/f.pdf:/content&encoding=base64"`,
+      ]
+        .filter(Boolean)
+        .join(" \\\n  ")
+
+      expect(curlParts).toContain('base64 "')
+      expect(curlParts).toContain("tr -d")
+      expect(curlParts).not.toContain("base64 -i")
+    })
+
+    it("should include encoding=base64 in upload URL", () => {
+      const params = new URLSearchParams({
+        path: "/drives/driveId/root:/folder/file.pdf:/content",
+        conflictBehavior: "rename",
+        contentType: "application/pdf",
+        encoding: "base64",
+      })
+      const uploadUrl = `http://localhost:8080/upload?${params.toString()}`
+      expect(uploadUrl).toContain("encoding=base64")
     })
   })
 })
