@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { mkdir, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { basename, extname, join } from "node:path"
@@ -28,6 +29,17 @@ const require = createRequire(import.meta.url)
 const { version: PKG_VERSION } = require("../package.json") as {
   version: `${number}.${number}.${number}`
 }
+
+function getGitHash(): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).trim()
+  } catch {
+    return undefined
+  }
+}
+
+const GIT_HASH = getGitHash()
+const VERSION_STRING = GIT_HASH ? `v${PKG_VERSION}+${GIT_HASH}` : `v${PKG_VERSION}`
 
 export const DEFAULT_CLIENT_ID = "cf7d1f97-781e-4034-930c-abd420e12d49"
 export const GRAPH_BASE_URL = "https://graph.microsoft.com"
@@ -121,7 +133,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
     health: {
       enabled: true,
       path: "/health",
-      message: `healthy v${PKG_VERSION}`,
+      message: `healthy ${VERSION_STRING}`,
       status: 200,
     },
     authenticate: config.apiKey
