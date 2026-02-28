@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises"
+import { createRequire } from "node:module"
 import { basename, extname, join } from "node:path"
 
 import ExcelJS from "exceljs"
@@ -22,6 +23,11 @@ export type { SiteCache, SiteInfo } from "./cache/site-cache.js"
 export { createSiteCache } from "./cache/site-cache.js"
 export type { SearchResult } from "./tools/sharepoint-search.js"
 export { buildSearchTool } from "./tools/sharepoint-search.js"
+
+const require = createRequire(import.meta.url)
+const { version: PKG_VERSION } = require("../package.json") as {
+  version: `${number}.${number}.${number}`
+}
 
 export const DEFAULT_CLIENT_ID = "cf7d1f97-781e-4034-930c-abd420e12d49"
 export const GRAPH_BASE_URL = "https://graph.microsoft.com"
@@ -109,13 +115,13 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
 
   const server = new FastMCP({
     name: "microsoft-graph-server",
-    version: "1.0.0",
+    version: PKG_VERSION,
     instructions,
     auth: authProvider,
     health: {
       enabled: true,
       path: "/health",
-      message: "healthy",
+      message: `healthy v${PKG_VERSION}`,
       status: 200,
     },
     authenticate: config.apiKey
