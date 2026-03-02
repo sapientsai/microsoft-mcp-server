@@ -3,6 +3,13 @@
     "microsoft-graph": {
       "type": "http",
       "url": "http://localhost:8080/mcp"
+    },
+    "ms-mcp-civala-sharepoint": {
+      "type": "http",
+      "url": "https://ms-mcp-central.civala.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer NIf3Oe1rFkENOSxJEMGMUg4i4rqS2MABZGZ7ir5J73Q="
+      }
     }
   }
 }

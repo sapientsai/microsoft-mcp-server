@@ -1,6 +1,9 @@
 services:
   microsoft-graph-mcp:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_HASH: ${GIT_HASH:-}
     ports:
       - "${PORT:-8080}:8080"
     environment:
