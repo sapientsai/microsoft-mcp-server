@@ -34,7 +34,9 @@ function getGitHash(): string | undefined {
   try {
     return execFileSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).trim()
   } catch {
-    return undefined
+    // Fallback for Docker/CI where .git is unavailable — set via GIT_HASH build arg
+    const envHash = process.env.GIT_HASH
+    return envHash ? envHash.slice(0, 7) : undefined
   }
 }
 
