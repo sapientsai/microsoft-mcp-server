@@ -10,6 +10,12 @@ export type ServerConfig = {
   authMode: AuthMode
   appScopes: string[]
   apiKey?: string
+  aiSearchEndpoint?: string
+  aiSearchApiKey?: string
+  aiSearchIndexName?: string
+  aiSearchSemanticConfig?: string
+  aiSearchVectorFields?: string
+  aiSearchSelectFields?: string
 }
 
 export type AppOnlySession = {
