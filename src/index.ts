@@ -15,6 +15,8 @@ import { filenameFromHeaders, filenameFromPath, formatBytes, processDownloadResp
 import { extractTextFromBuffer, resolveUploadContentType } from "./download/extract.js"
 import { type AuthError, authError, type ConfigError, configError } from "./errors.js"
 import { AZURE_BASE_URL, GRAPH_BASE_URL } from "./graph/client.js"
+import type { AiSearchConfig } from "./search/ai-search-client.js"
+import { buildAiSearchTool } from "./tools/ai-search.js"
 import { buildSearchTool } from "./tools/sharepoint-search.js"
 import {
   decodeBase64Upload,
@@ -52,6 +54,10 @@ export {
 export type { AppError, AuthError, ConfigError, GraphError } from "./errors.js"
 export { authError, configError, graphError } from "./errors.js"
 export { AZURE_BASE_URL, GRAPH_BASE_URL, graphFetch, parseGraphError } from "./graph/client.js"
+export type { AiSearchConfig } from "./search/ai-search-client.js"
+export { AI_SEARCH_API_VERSION, aiSearchFetch, parseAiSearchError } from "./search/ai-search-client.js"
+export type { AiSearchResult } from "./tools/ai-search.js"
+export { buildAiSearchTool } from "./tools/ai-search.js"
 export type { SearchResult } from "./tools/sharepoint-search.js"
 export { buildSearchTool } from "./tools/sharepoint-search.js"
 export type { DriveItemResponse } from "./upload/upload.js"
@@ -118,6 +124,12 @@ export function createConfig(): Readonly<ServerConfig> {
       "https://graph.microsoft.com/.default",
     ],
     apiKey: process.env.MCP_API_KEY ?? undefined,
+    aiSearchEndpoint: process.env.AZURE_AI_SEARCH_ENDPOINT ?? undefined,
+    aiSearchApiKey: process.env.AZURE_AI_SEARCH_API_KEY ?? undefined,
+    aiSearchIndexName: process.env.AZURE_AI_SEARCH_INDEX_NAME ?? undefined,
+    aiSearchSemanticConfig: process.env.AZURE_AI_SEARCH_SEMANTIC_CONFIG ?? undefined,
+    aiSearchVectorFields: process.env.AZURE_AI_SEARCH_VECTOR_FIELDS ?? undefined,
+    aiSearchSelectFields: process.env.AZURE_AI_SEARCH_SELECT_FIELDS ?? undefined,
   }
 
   validateConfig(config).orThrow()
@@ -589,6 +601,19 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
   server.addTool(
     buildSearchTool(async (session) => (await resolveAccessToken(session)).orThrow(), config.authMode, siteCache),
   )
+
+  // Azure AI Search tool (optional — only registered when configured)
+  if (config.aiSearchEndpoint && config.aiSearchApiKey && config.aiSearchIndexName) {
+    const aiSearchConfig: AiSearchConfig = {
+      endpoint: config.aiSearchEndpoint,
+      apiKey: config.aiSearchApiKey,
+      indexName: config.aiSearchIndexName,
+      semanticConfiguration: config.aiSearchSemanticConfig,
+      vectorFields: config.aiSearchVectorFields,
+      selectFields: config.aiSearchSelectFields,
+    }
+    server.addTool(buildAiSearchTool(aiSearchConfig))
+  }
 
   // HTTP upload endpoint
   const app = server.getApp()
