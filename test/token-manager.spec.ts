@@ -38,9 +38,10 @@ describe("Token Manager", () => {
     } as Response)
 
     const tokenManager = createTokenManager(mockConfig)
-    const token = await tokenManager.getToken()
+    const result = await tokenManager.getToken()
 
-    expect(token).toBe("test-token-123")
+    expect(result.isRight()).toBe(true)
+    expect(result.orThrow()).toBe("test-token-123")
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(fetch).toHaveBeenCalledWith(
       `https://login.microsoftonline.com/${mockConfig.tenantId}/oauth2/v2.0/token`,
@@ -68,12 +69,12 @@ describe("Token Manager", () => {
     const tokenManager = createTokenManager(mockConfig)
 
     // First call - fetches token
-    const token1 = await tokenManager.getToken()
+    const result1 = await tokenManager.getToken()
     // Second call - should return cached token
-    const token2 = await tokenManager.getToken()
+    const result2 = await tokenManager.getToken()
 
-    expect(token1).toBe("cached-token")
-    expect(token2).toBe("cached-token")
+    expect(result1.orThrow()).toBe("cached-token")
+    expect(result2.orThrow()).toBe("cached-token")
     expect(fetch).toHaveBeenCalledTimes(1) // Only called once
   })
 
@@ -103,19 +104,19 @@ describe("Token Manager", () => {
     const tokenManager = createTokenManager(mockConfig)
 
     // First call
-    const token1 = await tokenManager.getToken()
-    expect(token1).toBe("first-token")
+    const result1 = await tokenManager.getToken()
+    expect(result1.orThrow()).toBe("first-token")
 
     // Advance time by 2 minutes (within 5 minute buffer)
     vi.advanceTimersByTime(2 * 60 * 1000)
 
     // Should refresh because we're within 5 minute buffer of 6 minute expiry
-    const token2 = await tokenManager.getToken()
-    expect(token2).toBe("refreshed-token")
+    const result2 = await tokenManager.getToken()
+    expect(result2.orThrow()).toBe("refreshed-token")
     expect(fetch).toHaveBeenCalledTimes(2)
   })
 
-  it("should throw error on failed token request", async () => {
+  it("should return Left on failed token request", async () => {
     const errorResponse = {
       error: "invalid_client",
       error_description: "Invalid client credentials",
@@ -128,8 +129,12 @@ describe("Token Manager", () => {
     } as Response)
 
     const tokenManager = createTokenManager(mockConfig)
+    const result = await tokenManager.getToken()
 
-    await expect(tokenManager.getToken()).rejects.toThrow("Invalid client credentials")
+    expect(result.isLeft()).toBe(true)
+    result.tapLeft((err) => {
+      expect(err.message).toBe("Invalid client credentials")
+    })
   })
 
   it("should handle non-JSON error response", async () => {
@@ -140,8 +145,12 @@ describe("Token Manager", () => {
     } as Response)
 
     const tokenManager = createTokenManager(mockConfig)
+    const result = await tokenManager.getToken()
 
-    await expect(tokenManager.getToken()).rejects.toThrow("Token request failed: 500 - Internal Server Error")
+    expect(result.isLeft()).toBe(true)
+    result.tapLeft((err) => {
+      expect(err.message).toBe("Token request failed: 500 - Internal Server Error")
+    })
   })
 
   it("should return session with expiry info", async () => {
@@ -160,8 +169,10 @@ describe("Token Manager", () => {
     } as Response)
 
     const tokenManager = createTokenManager(mockConfig)
-    const session = await tokenManager.getSession()
+    const result = await tokenManager.getSession()
 
+    expect(result.isRight()).toBe(true)
+    const session = result.orThrow()
     expect(session.accessToken).toBe("session-token")
     expect(session.mode).toBe("clientCredentials")
     expect(session.expiresAt).toEqual(new Date("2024-01-15T13:00:00Z"))

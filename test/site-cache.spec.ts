@@ -34,8 +34,10 @@ describe("Site Cache", () => {
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(driveResponse) } as Response)
 
     const cache = createSiteCache()
-    const sites = await cache.getSites(mockToken)
+    const result = await cache.getSites(mockToken)
 
+    expect(result.isRight()).toBe(true)
+    const sites = result.orThrow()
     expect(sites).toHaveLength(1)
     expect(sites[0]).toEqual({
       id: "site-1",
@@ -56,10 +58,10 @@ describe("Site Cache", () => {
 
     const cache = createSiteCache()
 
-    const sites1 = await cache.getSites(mockToken)
-    const sites2 = await cache.getSites(mockToken)
+    const result1 = await cache.getSites(mockToken)
+    const result2 = await cache.getSites(mockToken)
 
-    expect(sites1).toEqual(sites2)
+    expect(result1.orThrow()).toEqual(result2.orThrow())
     expect(fetch).toHaveBeenCalledTimes(2) // only the initial fetch
   })
 
@@ -81,14 +83,14 @@ describe("Site Cache", () => {
 
     const cache = createSiteCache()
 
-    const sites1 = await cache.getSites(mockToken)
-    expect(sites1).toHaveLength(1)
+    const result1 = await cache.getSites(mockToken)
+    expect(result1.orThrow()).toHaveLength(1)
 
     // Advance past 1-hour TTL
     vi.advanceTimersByTime(61 * 60 * 1000)
 
-    const sites2 = await cache.getSites(mockToken)
-    expect(sites2).toHaveLength(2)
+    const result2 = await cache.getSites(mockToken)
+    expect(result2.orThrow()).toHaveLength(2)
   })
 
   it("should handle pagination", async () => {
@@ -105,9 +107,9 @@ describe("Site Cache", () => {
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(makeDriveResponse("drive-2")) } as Response)
 
     const cache = createSiteCache()
-    const sites = await cache.getSites(mockToken)
+    const result = await cache.getSites(mockToken)
 
-    expect(sites).toHaveLength(2)
+    expect(result.orThrow()).toHaveLength(2)
     expect(fetch).toHaveBeenCalledTimes(4) // 2 pages + 2 drive lookups
   })
 
@@ -122,8 +124,9 @@ describe("Site Cache", () => {
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(makeDriveResponse("drive-1")) } as Response)
 
     const cache = createSiteCache()
-    const sites = await cache.getSites(mockToken)
+    const result = await cache.getSites(mockToken)
 
+    const sites = result.orThrow()
     expect(sites).toHaveLength(1)
     expect(sites[0]?.id).toBe("site-1")
   })
@@ -137,24 +140,33 @@ describe("Site Cache", () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(sitesResponse) } as Response)
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(makeDriveResponse("drive-1")) } as Response)
-      .mockResolvedValueOnce({ ok: false, status: 404 } as Response) // site-2 drive fails
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        json: () => Promise.resolve({ error: { message: "Not found" } }),
+      } as Response) // site-2 drive fails
 
     const cache = createSiteCache()
-    const sites = await cache.getSites(mockToken)
+    const result = await cache.getSites(mockToken)
 
+    const sites = result.orThrow()
     expect(sites).toHaveLength(1)
     expect(sites[0]?.id).toBe("site-1")
   })
 
-  it("should throw on getAllSites failure", async () => {
+  it("should return Left on getAllSites failure", async () => {
     vi.mocked(fetch).mockResolvedValueOnce({
       ok: false,
       status: 403,
       statusText: "Forbidden",
+      json: () => Promise.resolve({ error: { message: "Forbidden" } }),
     } as Response)
 
     const cache = createSiteCache()
-    await expect(cache.getSites(mockToken)).rejects.toThrow("Failed to fetch sites: 403 Forbidden")
+    const result = await cache.getSites(mockToken)
+
+    expect(result.isLeft()).toBe(true)
   })
 
   it("should clear cache on invalidate()", async () => {

@@ -1,9 +1,11 @@
 import type { Context } from "fastmcp"
+import { type Either, Left, List, Option, Right } from "functype"
 import { z } from "zod"
 
 import type { AuthMode } from "../auth/types.js"
 import type { SiteCache } from "../cache/site-cache.js"
-import { GRAPH_BASE_URL } from "../index.js"
+import { type GraphError, graphError } from "../errors.js"
+import { GRAPH_BASE_URL, graphFetch } from "../graph/client.js"
 
 export type SearchResult = {
   readonly name: string
@@ -61,10 +63,27 @@ const searchParameters = z.object({
   fileTypes: z.array(z.string()).optional().describe('Filter by file extensions (e.g., ["docx", "pdf", "xlsx"])'),
 })
 
+function mapHitToResult(hit: SearchHit): SearchResult {
+  const resource = Option(hit.resource)
+  return {
+    name: resource.flatMap((r) => Option(r.name)).orElse(""),
+    driveItemId: resource.flatMap((r) => Option(r.id)).orElse(""),
+    driveId: resource.flatMap((r) => Option(r.parentReference?.driveId)).orElse(""),
+    siteId: resource.flatMap((r) => Option(r.parentReference?.siteId)).orElse(""),
+    webUrl: resource.flatMap((r) => Option(r.webUrl)).orElse(""),
+    lastModified: resource.flatMap((r) => Option(r.lastModifiedDateTime)).orElse(""),
+    size: resource.flatMap((r) => Option(r.size)).orElse(0),
+    mimeType: resource.flatMap((r) => Option(r.file?.mimeType)).orElse(""),
+    hitHighlights: Option(hit._summary)
+      .map((s) => [s])
+      .orElse([]),
+  }
+}
+
 async function searchInteractive(
   accessToken: string,
   args: z.infer<typeof searchParameters>,
-): Promise<readonly SearchResult[]> {
+): Promise<Either<GraphError, readonly SearchResult[]>> {
   const fileTypeClause =
     args.fileTypes && args.fileTypes.length > 0
       ? ` (${args.fileTypes.map((ext) => `filetype:${ext}`).join(" OR ")})`
@@ -83,37 +102,18 @@ async function searchInteractive(
     ],
   }
 
-  const response = await fetch(`${GRAPH_BASE_URL}/v1.0/search/query`, {
+  const result = await graphFetch(`${GRAPH_BASE_URL}/v1.0/search/query`, accessToken, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   })
 
-  if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(`Search API error ${response.status}: ${errorText}`)
-  }
+  if (result.isLeft()) return Left(result.value)
 
-  const data = (await response.json()) as SearchResponse
+  const data = (await result.orThrow().json()) as SearchResponse
   const hits = data.value?.[0]?.hitsContainers?.[0]?.hits ?? []
 
-  return hits.map((hit): SearchResult => {
-    const resource = hit.resource ?? {}
-    return {
-      name: resource.name ?? "",
-      driveItemId: resource.id ?? "",
-      driveId: resource.parentReference?.driveId ?? "",
-      siteId: resource.parentReference?.siteId ?? "",
-      webUrl: resource.webUrl ?? "",
-      lastModified: resource.lastModifiedDateTime ?? "",
-      size: resource.size ?? 0,
-      mimeType: resource.file?.mimeType ?? "",
-      hitHighlights: hit._summary ? [hit._summary] : [],
-    }
-  })
+  return Right(hits.map(mapHitToResult) as readonly SearchResult[])
 }
 
 async function searchDrive(
@@ -121,90 +121,103 @@ async function searchDrive(
   driveId: string,
   siteId: string,
   query: string,
-): Promise<readonly SearchResult[]> {
-  const response = await fetch(
+): Promise<Either<GraphError, readonly SearchResult[]>> {
+  const result = await graphFetch(
     `${GRAPH_BASE_URL}/v1.0/drives/${driveId}/root/search(q='${encodeURIComponent(query)}')`,
-    {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    },
+    accessToken,
   )
 
-  if (!response.ok) return []
+  if (result.isLeft()) return Right([] as readonly SearchResult[]) // Graceful fallback for individual drive failures
 
-  const data = (await response.json()) as DriveSearchResponse
+  const data = (await result.orThrow().json()) as DriveSearchResponse
   const items = data.value ?? []
 
-  return items
+  const results = items
     .filter((item) => item.file) // only files, not folders
     .map(
       (item): SearchResult => ({
-        name: item.name ?? "",
-        driveItemId: item.id ?? "",
-        driveId: item.parentReference?.driveId ?? driveId,
-        siteId: item.parentReference?.siteId ?? siteId,
-        webUrl: item.webUrl ?? "",
-        lastModified: item.lastModifiedDateTime ?? "",
-        size: item.size ?? 0,
-        mimeType: item.file?.mimeType ?? "",
+        name: Option(item.name).orElse(""),
+        driveItemId: Option(item.id).orElse(""),
+        driveId: Option(item.parentReference?.driveId).orElse(driveId),
+        siteId: Option(item.parentReference?.siteId).orElse(siteId),
+        webUrl: Option(item.webUrl).orElse(""),
+        lastModified: Option(item.lastModifiedDateTime).orElse(""),
+        size: Option(item.size).orElse(0),
+        mimeType: Option(item.file?.mimeType).orElse(""),
         hitHighlights: [],
       }),
     )
+
+  return Right(results as readonly SearchResult[])
 }
 
 async function searchClientCredentials(
   accessToken: string,
   args: z.infer<typeof searchParameters>,
   siteCache: SiteCache,
-): Promise<readonly SearchResult[]> {
+): Promise<Either<GraphError, readonly SearchResult[]>> {
   // Single site search
   if (args.siteId) {
-    const sites = await siteCache.getSites(accessToken)
+    const sitesResult = await siteCache.getSites(accessToken)
+    if (sitesResult.isLeft()) return Left(sitesResult.value)
+
+    const sites = sitesResult.orThrow()
     const site = sites.find((s) => s.id === args.siteId)
     if (!site) {
-      throw new Error(`Site ${args.siteId} not found or not accessible.`)
+      return Left(graphError("site_not_found", `Site ${args.siteId} not found or not accessible.`, 404))
     }
     const results = await searchDrive(accessToken, site.driveId, site.id, args.query)
-    return filterAndSort(results, args)
+    return results.map((r) => filterAndSort(r, args))
   }
 
   // Fan-out across all cached sites
-  const sites = await siteCache.getSites(accessToken)
+  const sitesResult = await siteCache.getSites(accessToken)
+  if (sitesResult.isLeft()) return Left(sitesResult.value)
+
+  const sites = sitesResult.orThrow()
   if (sites.length === 0) {
-    return []
+    return Right([] as readonly SearchResult[])
   }
 
-  const settled = await Promise.allSettled(
+  const driveResults = await Promise.all(
     sites.map((site) => searchDrive(accessToken, site.driveId, site.id, args.query)),
   )
 
   const allResults: SearchResult[] = []
-  for (const result of settled) {
-    if (result.status === "fulfilled") {
-      allResults.push(...result.value)
+  for (const result of driveResults) {
+    if (result.isRight()) {
+      allResults.push(...result.orThrow())
     } else {
-      console.warn(`[sharepoint-search] Site search failed: ${result.reason}`)
+      result.tapLeft((err) => {
+        console.warn(`[sharepoint-search] Site search failed: ${err.message}`)
+      })
     }
   }
 
-  return filterAndSort(allResults, args)
+  return Right(filterAndSort(allResults, args) as readonly SearchResult[])
 }
 
 function filterAndSort(
   results: readonly SearchResult[],
   args: z.infer<typeof searchParameters>,
 ): readonly SearchResult[] {
+  const list = List(results as SearchResult[])
+
   const filtered =
     args.fileTypes && args.fileTypes.length > 0
       ? (() => {
           const extensions = new Set(args.fileTypes!.map((ext) => ext.toLowerCase().replace(/^\./, "")))
-          return results.filter((r) => {
+          return list.filter((r) => {
             const ext = r.name.split(".").pop()?.toLowerCase()
             return ext !== undefined && extensions.has(ext)
           })
         })()
-      : [...results]
+      : list
 
-  return filtered.toSorted((a, b) => b.lastModified.localeCompare(a.lastModified)).slice(0, args.top)
+  return filtered
+    .sorted((a, b) => b.lastModified.localeCompare(a.lastModified))
+    .take(args.top)
+    .toArray()
 }
 
 export function buildSearchTool(
@@ -221,11 +234,12 @@ export function buildSearchTool(
       const accessToken = await resolveAccessToken(context.session)
       context.log.info("SharePoint search", { query: args.query, mode: authMode, siteId: args.siteId })
 
-      const results =
+      const resultsEither =
         authMode === "interactive"
           ? await searchInteractive(accessToken, args)
           : await searchClientCredentials(accessToken, args, siteCache!)
 
+      const results = resultsEither.orThrow()
       return JSON.stringify({ results, totalCount: results.length }, null, 2)
     },
   }
