@@ -1,3 +1,4 @@
+import { Right } from "functype"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { SiteCache, SiteInfo } from "../src/cache/site-cache.js"
@@ -124,7 +125,7 @@ describe("SharePoint Search Tool", () => {
     ]
 
     const mockSiteCache: SiteCache = {
-      getSites: vi.fn().mockResolvedValue(mockSites),
+      getSites: vi.fn().mockResolvedValue(Right(mockSites)),
       invalidate: vi.fn(),
     }
 
@@ -213,7 +214,12 @@ describe("SharePoint Search Tool", () => {
 
       vi.mocked(fetch)
         .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(driveSearchResponse) } as Response)
-        .mockResolvedValueOnce({ ok: false, status: 404 } as Response) // site-2 fails
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 404,
+          statusText: "Not Found",
+          json: () => Promise.resolve({ error: { message: "Not found" } }),
+        } as Response) // site-2 fails
 
       const tool = buildSearchTool(mockResolveToken, "clientCredentials", mockSiteCache)
       const result = await tool.execute({ query: "doc", top: 10 }, { session: {}, log: mockLog } as never)
@@ -252,7 +258,7 @@ describe("SharePoint Search Tool", () => {
 
       // Only one site to simplify
       const singleSiteCache: SiteCache = {
-        getSites: vi.fn().mockResolvedValue([mockSites[0]]),
+        getSites: vi.fn().mockResolvedValue(Right([mockSites[0]])),
         invalidate: vi.fn(),
       }
 
@@ -274,7 +280,7 @@ describe("SharePoint Search Tool", () => {
 
     it("should return empty results when no sites are available", async () => {
       const emptySiteCache: SiteCache = {
-        getSites: vi.fn().mockResolvedValue([]),
+        getSites: vi.fn().mockResolvedValue(Right([])),
         invalidate: vi.fn(),
       }
 

@@ -1,13 +1,9 @@
 import { execFileSync } from "node:child_process"
-import { mkdir, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
-import { basename, extname, join } from "node:path"
 
-import ExcelJS from "exceljs"
 import type { AzureSession, OAuthSession } from "fastmcp"
-import { AzureProvider, FastMCP, imageContent } from "fastmcp"
-import mammoth from "mammoth"
-import { extractText as extractPdfText, getDocumentProxy } from "unpdf"
+import { AzureProvider, FastMCP } from "fastmcp"
+import { type Either, Left, Option, Right } from "functype"
 import { z } from "zod"
 
 import type { TokenManager } from "./auth/token-manager.js"
@@ -15,15 +11,51 @@ import { createTokenManager } from "./auth/token-manager.js"
 import type { AuthMode, ServerConfig } from "./auth/types.js"
 import type { SiteCache } from "./cache/site-cache.js"
 import { createSiteCache } from "./cache/site-cache.js"
+import { filenameFromHeaders, filenameFromPath, formatBytes, processDownloadResponse } from "./download/download.js"
+import { extractTextFromBuffer, resolveUploadContentType } from "./download/extract.js"
+import { type AuthError, authError, type ConfigError, configError } from "./errors.js"
+import { AZURE_BASE_URL, GRAPH_BASE_URL } from "./graph/client.js"
 import { buildSearchTool } from "./tools/sharepoint-search.js"
+import {
+  decodeBase64Upload,
+  type DriveItemResponse,
+  MAX_UPLOAD_SIZE,
+  sessionUpload,
+  SIMPLE_UPLOAD_LIMIT,
+  simpleUpload,
+} from "./upload/upload.js"
 
+// Re-exports for public API
 export type { TokenManager } from "./auth/token-manager.js"
 export { createTokenManager } from "./auth/token-manager.js"
 export type { AuthMode, ServerConfig } from "./auth/types.js"
 export type { SiteCache, SiteInfo } from "./cache/site-cache.js"
 export { createSiteCache } from "./cache/site-cache.js"
+export {
+  type DownloadResult,
+  filenameFromHeaders,
+  filenameFromPath,
+  filenameFromUrl,
+  formatBytes,
+  isTextContent,
+  processDownloadResponse,
+  TEXT_MIME_PREFIXES,
+  TEXT_MIME_SUFFIXES,
+} from "./download/download.js"
+export {
+  CONTENT_TYPE_MAP,
+  EXTRACTABLE_TYPES,
+  extractTextFromBuffer,
+  resolveContentType,
+  resolveUploadContentType,
+} from "./download/extract.js"
+export type { AppError, AuthError, ConfigError, GraphError } from "./errors.js"
+export { authError, configError, graphError } from "./errors.js"
+export { AZURE_BASE_URL, GRAPH_BASE_URL, graphFetch, parseGraphError } from "./graph/client.js"
 export type { SearchResult } from "./tools/sharepoint-search.js"
 export { buildSearchTool } from "./tools/sharepoint-search.js"
+export type { DriveItemResponse } from "./upload/upload.js"
+export { decodeBase64Upload, sessionUpload, simpleUpload } from "./upload/upload.js"
 
 const require = createRequire(import.meta.url)
 const { version: PKG_VERSION } = require("../package.json") as {
@@ -34,7 +66,6 @@ function getGitHash(): string | undefined {
   try {
     return execFileSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).trim()
   } catch {
-    // Fallback for Docker/CI where .git is unavailable — set via GIT_HASH build arg
     const envHash = process.env.GIT_HASH
     return envHash ? envHash.slice(0, 7) : undefined
   }
@@ -44,32 +75,27 @@ const GIT_HASH = getGitHash()
 const VERSION_STRING = GIT_HASH ? `v${PKG_VERSION}+${GIT_HASH}` : `v${PKG_VERSION}`
 
 export const DEFAULT_CLIENT_ID = "cf7d1f97-781e-4034-930c-abd420e12d49"
-export const GRAPH_BASE_URL = "https://graph.microsoft.com"
-export const AZURE_BASE_URL = "https://management.azure.com"
 
-function parseAuthMode(value: string | undefined): AuthMode {
-  if (!value || value === "interactive") {
-    return "interactive"
-  }
-  if (value === "clientCredentials") {
-    return "clientCredentials"
-  }
-  throw new Error(`Invalid AZURE_AUTH_MODE: "${value}". Must be "interactive" or "clientCredentials".`)
+function parseAuthMode(value: string | undefined): Either<ConfigError, AuthMode> {
+  if (!value || value === "interactive") return Right("interactive" as AuthMode)
+  if (value === "clientCredentials") return Right("clientCredentials" as AuthMode)
+  return Left(configError(`Invalid AZURE_AUTH_MODE: "${value}". Must be "interactive" or "clientCredentials".`))
 }
 
-function validateConfig(config: Readonly<ServerConfig>): void {
+function validateConfig(config: Readonly<ServerConfig>): Either<ConfigError, void> {
   if (config.authMode === "clientCredentials") {
     if (config.tenantId === "common") {
-      throw new Error('Client credentials auth requires a specific tenant ID, not "common".')
+      return Left(configError('Client credentials auth requires a specific tenant ID, not "common".'))
     }
     if (!config.clientSecret) {
-      throw new Error("Client credentials auth requires AZURE_CLIENT_SECRET.")
+      return Left(configError("Client credentials auth requires AZURE_CLIENT_SECRET."))
     }
   }
+  return Right(undefined as void)
 }
 
 export function createConfig(): Readonly<ServerConfig> {
-  const authMode = parseAuthMode(process.env.AZURE_AUTH_MODE)
+  const authMode = parseAuthMode(process.env.AZURE_AUTH_MODE).orThrow()
 
   const config: Readonly<ServerConfig> = {
     clientId: process.env.AZURE_CLIENT_ID ?? DEFAULT_CLIENT_ID,
@@ -94,7 +120,7 @@ export function createConfig(): Readonly<ServerConfig> {
     apiKey: process.env.MCP_API_KEY ?? undefined,
   }
 
-  validateConfig(config)
+  validateConfig(config).orThrow()
 
   return config
 }
@@ -102,7 +128,6 @@ export function createConfig(): Readonly<ServerConfig> {
 export function createServer(config: Readonly<ServerConfig>) {
   const isClientCredentials = config.authMode === "clientCredentials"
 
-  // Only create AzureProvider for interactive mode
   const authProvider = isClientCredentials
     ? undefined
     : new AzureProvider({
@@ -113,10 +138,7 @@ export function createServer(config: Readonly<ServerConfig>) {
         scopes: config.scopes,
       })
 
-  // Create token manager for client credentials mode
   const tokenManager: TokenManager | undefined = isClientCredentials ? createTokenManager(config) : undefined
-
-  // Create site cache for client credentials mode (used by SharePoint search fan-out)
   const siteCache: SiteCache | undefined = isClientCredentials ? createSiteCache() : undefined
 
   const baseInstructions = `Microsoft Graph MCP Server - Access Microsoft 365 data including users, mail, calendar, files, and more. Use sharepoint_search to find documents by keyword, then sharepoint_get_content to retrieve document text for analysis.
@@ -140,11 +162,9 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
     },
     authenticate: config.apiKey
       ? (request) => {
-          // Check Authorization header first
           const authHeader = request.headers.authorization
           const headerKey = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : undefined
 
-          // Fall back to api_key query parameter if no header
           const queryKey =
             !headerKey && request.url
               ? (() => {
@@ -167,20 +187,20 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
       : undefined,
   })
 
-  const resolveAccessToken = async (session: unknown): Promise<string> => {
+  const resolveAccessToken = async (session: unknown): Promise<Either<AuthError, string>> => {
     if (isClientCredentials && tokenManager) {
       return tokenManager.getToken()
     }
     const authSession = session as OAuthSession | undefined
-    if (!authSession?.accessToken) {
-      throw new Error("Not authenticated. Please sign in first.")
-    }
-    return authSession.accessToken
+    return Option(authSession?.accessToken).toEither(authError("Not authenticated. Please sign in first."))
   }
 
   const baseToolDescription =
     "Execute Microsoft Graph API requests. Use this to access Microsoft 365 data including users, mail, calendar, files, and more."
-  const toolDescription = customInstructions ? `${baseToolDescription} ${customInstructions}` : baseToolDescription
+  const customInstructionsText = process.env.MCP_INSTRUCTIONS
+  const toolDescription = customInstructionsText
+    ? `${baseToolDescription} ${customInstructionsText}`
+    : baseToolDescription
 
   server.addTool({
     name: "microsoft_graph",
@@ -203,7 +223,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
         .describe("Request body for POST/PUT/PATCH operations"),
     }),
     execute: async (args, { session, log }) => {
-      const accessToken = await resolveAccessToken(session)
+      const accessToken = (await resolveAccessToken(session)).orThrow()
 
       const baseUrl = args.apiType === "azure" ? AZURE_BASE_URL : GRAPH_BASE_URL
       const basePath = args.apiType === "azure" ? `${baseUrl}${args.path}` : `${baseUrl}/${args.apiVersion}${args.path}`
@@ -270,7 +290,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
       apiVersion: z.enum(["v1.0", "beta"]).default("v1.0").describe("Graph API version"),
     }),
     execute: async (args, { session, log }) => {
-      const accessToken = await resolveAccessToken(session)
+      const accessToken = (await resolveAccessToken(session)).orThrow()
 
       const batchRequests = args.requests.map((req) => {
         const normalized: Record<string, unknown> = {
@@ -280,10 +300,8 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
         }
 
         if (req.body !== undefined) {
-          // Parse string bodies into objects — Graph batch expects JSON objects, not stringified JSON
           normalized.body = typeof req.body === "string" ? JSON.parse(req.body) : req.body
 
-          // Auto-add Content-Type header for requests with a body
           const headers = req.headers ? { ...req.headers } : {}
           if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
             headers["Content-Type"] = "application/json"
@@ -332,33 +350,32 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
     parameters: z.object({}),
     execute: async (_args, { session }) => {
       if (isClientCredentials && tokenManager) {
-        // Client credentials mode - check token manager
-        try {
-          const appSession = await tokenManager.getSession()
-          return JSON.stringify(
-            {
-              authenticated: true,
-              mode: "clientCredentials",
-              message: "Authenticated via client credentials (app-only)",
-              expiresAt: appSession.expiresAt.toISOString(),
-            },
-            null,
-            2,
-          )
-        } catch (error) {
-          return JSON.stringify(
-            {
-              authenticated: false,
-              mode: "clientCredentials",
-              message: `Authentication failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-            },
-            null,
-            2,
-          )
-        }
+        const result = await tokenManager.getSession()
+        return result.fold(
+          (err) =>
+            JSON.stringify(
+              {
+                authenticated: false,
+                mode: "clientCredentials",
+                message: `Authentication failed: ${err.message}`,
+              },
+              null,
+              2,
+            ),
+          (appSession) =>
+            JSON.stringify(
+              {
+                authenticated: true,
+                mode: "clientCredentials",
+                message: "Authenticated via client credentials (app-only)",
+                expiresAt: appSession.expiresAt.toISOString(),
+              },
+              null,
+              2,
+            ),
+        )
       }
 
-      // Interactive mode
       const authSession = session as AzureSession | undefined
       const hasAuth = !!authSession?.accessToken
       return JSON.stringify(
@@ -397,7 +414,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
         .describe("Override filename. If not provided, uses the filename from the response headers or URL."),
     }),
     execute: async (args, { session, log }) => {
-      const accessToken = await resolveAccessToken(session)
+      const accessToken = (await resolveAccessToken(session)).orThrow()
 
       const queryParams = args.format ? `?format=${args.format}` : ""
       const url = `${GRAPH_BASE_URL}/${args.apiVersion}${args.path}${queryParams}`
@@ -406,9 +423,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
 
       const response = await fetch(url, {
         method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       })
 
       if (!response.ok) {
@@ -421,8 +436,10 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
       }
 
       const contentType = response.headers.get("content-type") ?? "application/octet-stream"
-      const resolvedFilename =
-        args.filename ?? filenameFromHeaders(response.headers) ?? filenameFromPath(args.path) ?? "download"
+      const resolvedFilename = Option(args.filename)
+        .or(filenameFromHeaders(response.headers))
+        .or(filenameFromPath(args.path))
+        .orElse("download")
       const buffer = Buffer.from(await response.arrayBuffer())
 
       return processDownloadResponse(buffer, contentType, resolvedFilename, args.outputDir)
@@ -451,7 +468,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
     }),
     // eslint-disable-next-line @typescript-eslint/require-await
     execute: async (args) => {
-      const filename = filenameFromPath(args.path) ?? "upload"
+      const filename = filenameFromPath(args.path).orElse("upload")
       const contentType = resolveUploadContentType(args.contentType, filename)
       const localFile = args.localFile ?? "{local_file_path}"
 
@@ -514,7 +531,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
         .describe("Maximum characters to return (1000-200000). Content beyond this limit is truncated."),
     }),
     execute: async (args, { session, log }) => {
-      const accessToken = await resolveAccessToken(session)
+      const accessToken = (await resolveAccessToken(session)).orThrow()
 
       const queryParams = args.format ? `?format=${args.format}` : ""
       const url = `${GRAPH_BASE_URL}/${args.apiVersion}${args.path}${queryParams}`
@@ -523,9 +540,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
 
       const response = await fetch(url, {
         method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       })
 
       if (!response.ok) {
@@ -538,7 +553,10 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
       }
 
       const contentType = response.headers.get("content-type") ?? "application/octet-stream"
-      const resolvedFilename = filenameFromHeaders(response.headers) ?? filenameFromPath(args.path) ?? "download"
+      const resolvedFilename = Option<string>(undefined)
+        .or(filenameFromHeaders(response.headers))
+        .or(filenameFromPath(args.path))
+        .orElse("download")
       const buffer = Buffer.from(await response.arrayBuffer())
 
       const maxFileSize = 10 * 1024 * 1024 // 10 MB
@@ -548,7 +566,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
         )
       }
 
-      const fullText = await extractTextFromBuffer(buffer, contentType, resolvedFilename)
+      const fullText = (await extractTextFromBuffer(buffer, contentType, resolvedFilename)).orThrow()
 
       const maxChars = args.maxChars ?? 50000
       const text =
@@ -568,11 +586,11 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
   })
 
   // SharePoint search tool
-  server.addTool(buildSearchTool(resolveAccessToken, config.authMode, siteCache))
+  server.addTool(
+    buildSearchTool(async (session) => (await resolveAccessToken(session)).orThrow(), config.authMode, siteCache),
+  )
 
-  // HTTP upload endpoint — bypasses MCP protocol for binary file uploads
-  // Accepts both POST and PUT for maximum compatibility with proxies and clients
-  // Used by Claude Container: curl -X POST --data-binary @file "https://server/upload?path=..."
+  // HTTP upload endpoint
   const app = server.getApp()
 
   const handleUpload = async (req: {
@@ -596,7 +614,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
     const conflictBehavior = req.query("conflictBehavior") ?? "rename"
     const explicitContentType = req.query("contentType")
 
-    // Read body — decode base64 if encoding=base64 (workaround for reverse proxies rejecting binary bodies)
+    // Read body
     const encoding = req.query("encoding")
     const arrayBuffer = await req.arrayBuffer()
     const rawBuffer = Buffer.from(arrayBuffer)
@@ -606,16 +624,17 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
     if (buffer.length > MAX_UPLOAD_SIZE) return { status: 413 as const, body: { error: "File too large (max 250MB)" } }
 
     // Resolve
-    const accessToken = await resolveAccessToken(undefined)
-    const filename = filenameFromPath(path) ?? "upload"
+    const accessToken = (await resolveAccessToken(undefined)).orThrow()
+    const filename = filenameFromPath(path).orElse("upload")
     const contentType = resolveUploadContentType(explicitContentType, filename)
     const apiBase = `${GRAPH_BASE_URL}/${apiVersion}`
 
-    const driveItem =
+    const uploadResult: Either<{ message: string }, DriveItemResponse> =
       buffer.length <= SIMPLE_UPLOAD_LIMIT
         ? await simpleUpload(apiBase, path, accessToken, buffer, contentType, conflictBehavior)
         : await sessionUpload(apiBase, path, accessToken, buffer, conflictBehavior)
 
+    const driveItem = uploadResult.orThrow()
     return { status: 200 as const, body: driveItem }
   }
 
@@ -640,340 +659,6 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
   })
 
   return { server, authProvider, tokenManager, siteCache, config }
-}
-
-export const TEXT_MIME_PREFIXES = ["text/", "application/json", "application/xml", "application/csv"]
-export const TEXT_MIME_SUFFIXES = ["+xml", "+json"]
-
-export function isTextContent(contentType: string): boolean {
-  const lower = contentType.toLowerCase()
-  return (
-    TEXT_MIME_PREFIXES.some((prefix) => lower.startsWith(prefix)) ||
-    TEXT_MIME_SUFFIXES.some((suffix) => lower.includes(suffix))
-  )
-}
-
-export function filenameFromHeaders(headers: Headers): string | undefined {
-  const disposition = headers.get("content-disposition")
-  if (!disposition) return undefined
-  const match = /filename\*?=(?:UTF-8''|"?)([^";]+)"?/i.exec(disposition)
-  return match?.[1] ? decodeURIComponent(match[1]) : undefined
-}
-
-export function filenameFromPath(path: string): string | undefined {
-  // Handle paths like /me/drive/root:/Documents/report.pdf:/content
-  const colonPathMatch = /:\/([^:]+):\/content/i.exec(path)
-  if (colonPathMatch?.[1]) {
-    return basename(colonPathMatch[1])
-  }
-  return undefined
-}
-
-export function filenameFromUrl(url: string): string | undefined {
-  try {
-    const { pathname } = new URL(url)
-    const name = basename(pathname)
-    return name && name !== "/" ? decodeURIComponent(name) : undefined
-  } catch {
-    return undefined
-  }
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B"
-  const units = ["B", "KB", "MB", "GB"]
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  const value = bytes / Math.pow(1024, i)
-  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
-}
-
-export type DownloadResult = {
-  content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>
-}
-
-export async function processDownloadResponse(
-  buffer: Buffer,
-  contentType: string,
-  filename: string,
-  outputDir?: string,
-): Promise<DownloadResult> {
-  // Images: return inline via MCP image content so the LLM can see them
-  if (contentType.startsWith("image/")) {
-    const img = await imageContent({ buffer })
-    return {
-      content: [{ type: "text" as const, text: `Image: ${filename} (${formatBytes(buffer.length)})` }, img],
-    }
-  }
-
-  // Text-based files: return content inline so the LLM can read them
-  if (isTextContent(contentType)) {
-    const text = buffer.toString("utf-8")
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `File: ${filename} (${formatBytes(buffer.length)}, ${contentType})\n\n${text}`,
-        },
-      ],
-    }
-  }
-
-  // Binary files (Office docs, PDFs, etc.): return base64 content + optionally save to disk
-  const base64Data = buffer.toString("base64")
-
-  // Save to disk when outputDir is explicitly provided (useful for stdio/local mode)
-  const savedPath = outputDir
-    ? await (async () => {
-        await mkdir(outputDir, { recursive: true })
-        const outputPath = join(outputDir, filename)
-        await writeFile(outputPath, buffer)
-        return outputPath
-      })()
-    : undefined
-
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify(
-          {
-            filename,
-            contentType,
-            size: buffer.length,
-            sizeFormatted: formatBytes(buffer.length),
-            encoding: "base64",
-            data: base64Data,
-            ...(savedPath ? { savedTo: savedPath } : {}),
-          },
-          null,
-          2,
-        ),
-      },
-    ],
-  }
-}
-
-const CONTENT_TYPE_MAP: Record<string, string> = {
-  ".pdf": "application/pdf",
-  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  ".doc": "application/msword",
-  ".xls": "application/vnd.ms-excel",
-  ".ppt": "application/vnd.ms-powerpoint",
-  ".txt": "text/plain",
-  ".csv": "text/csv",
-  ".json": "application/json",
-  ".xml": "application/xml",
-  ".html": "text/html",
-  ".htm": "text/html",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".svg": "image/svg+xml",
-  ".zip": "application/zip",
-  ".mp4": "video/mp4",
-  ".mp3": "audio/mpeg",
-}
-
-export const EXTRACTABLE_TYPES = [
-  "application/pdf",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-] as const
-
-function resolveContentType(contentType: string, filename: string): string {
-  const lower = contentType.toLowerCase()
-  // If the content type is generic, try to infer from file extension
-  if (lower === "application/octet-stream" || lower === "") {
-    const ext = extname(filename).toLowerCase()
-    return CONTENT_TYPE_MAP[ext] ?? contentType
-  }
-  return lower
-}
-
-export async function extractTextFromBuffer(buffer: Buffer, contentType: string, filename: string): Promise<string> {
-  const resolved = resolveContentType(contentType, filename)
-
-  // Text-based types: return directly
-  if (isTextContent(resolved)) {
-    return buffer.toString("utf-8")
-  }
-
-  // PDF
-  if (resolved === "application/pdf") {
-    const pdf = await getDocumentProxy(new Uint8Array(buffer))
-    try {
-      const { totalPages, text } = await extractPdfText(pdf, { mergePages: true })
-      return `[PDF: ${totalPages} page${totalPages === 1 ? "" : "s"}]\n\n${text}`
-    } finally {
-      await pdf.destroy()
-    }
-  }
-
-  // DOCX
-  if (resolved === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
-    const result = await mammoth.extractRawText({ buffer })
-    return result.value
-  }
-
-  // XLSX
-  if (resolved === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
-    const wb = new ExcelJS.Workbook()
-    await wb.xlsx.load(buffer as unknown as ArrayBuffer)
-    const parts: string[] = []
-    wb.eachSheet((ws) => {
-      const rows: string[] = []
-      ws.eachRow((row) => {
-        const cells = Array.isArray(row.values) ? row.values.slice(1) : []
-        rows.push(cells.map((v) => (v == null ? "" : String(v))).join(","))
-      })
-      const csv = rows.join("\n")
-      if (wb.worksheets.length > 1) {
-        parts.push(`[Sheet: ${ws.name}]\n${csv}`)
-      } else {
-        parts.push(csv)
-      }
-    })
-    return parts.join("\n\n")
-  }
-
-  const supported = [...EXTRACTABLE_TYPES, "text/*"].join(", ")
-  throw new Error(`Unsupported content type "${contentType}" for text extraction. Supported: ${supported}`)
-}
-
-// --- Upload helpers ---
-
-export function decodeBase64Upload(rawBuffer: Buffer): Buffer {
-  return Buffer.from(rawBuffer.toString("utf-8").replace(/\s/g, ""), "base64")
-}
-
-export type DriveItemResponse = {
-  id: string
-  name: string
-  size: number
-  webUrl: string
-  createdDateTime?: string
-  lastModifiedDateTime?: string
-  file?: { mimeType: string }
-  parentReference?: { driveId: string; path: string }
-}
-
-export function resolveUploadContentType(explicit: string | undefined, filename: string): string {
-  if (explicit) return explicit
-  const ext = extname(filename).toLowerCase()
-  return CONTENT_TYPE_MAP[ext] ?? "application/octet-stream"
-}
-
-export async function parseGraphError(response: Response): Promise<string> {
-  try {
-    const data = (await response.json()) as { error?: { message?: string; code?: string } }
-    if (data.error?.message) {
-      return data.error.code ? `${data.error.code}: ${data.error.message}` : data.error.message
-    }
-  } catch {
-    // Not JSON — fall through
-  }
-  return `HTTP ${response.status}: ${response.statusText}`
-}
-
-const SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024 // 4 MB
-const MAX_UPLOAD_SIZE = 250 * 1024 * 1024 // 250 MB
-const CHUNK_SIZE = 10 * 1024 * 1024 // 10 MB (must be multiple of 320 KiB)
-
-export async function simpleUpload(
-  apiBase: string,
-  path: string,
-  accessToken: string,
-  buffer: Buffer,
-  contentType: string,
-  conflictBehavior: string,
-): Promise<DriveItemResponse> {
-  const separator = path.includes("?") ? "&" : "?"
-  const url = `${apiBase}${path}${separator}@microsoft.graph.conflictBehavior=${conflictBehavior}`
-
-  const response = await fetch(url, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": contentType,
-      "Content-Length": String(buffer.length),
-    },
-    body: new Uint8Array(buffer),
-  })
-
-  if (!response.ok) {
-    const message = await parseGraphError(response)
-    throw new Error(message)
-  }
-
-  return (await response.json()) as DriveItemResponse
-}
-
-export async function sessionUpload(
-  apiBase: string,
-  path: string,
-  accessToken: string,
-  buffer: Buffer,
-  conflictBehavior: string,
-): Promise<DriveItemResponse> {
-  // The path ends with :/content — replace :/content with :/createUploadSession
-  const sessionPath = path.replace(/:\/?content$/i, ":/createUploadSession")
-  const sessionUrl = `${apiBase}${sessionPath}`
-
-  const createResponse = await fetch(sessionUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      item: { "@microsoft.graph.conflictBehavior": conflictBehavior },
-    }),
-  })
-
-  if (!createResponse.ok) {
-    const message = await parseGraphError(createResponse)
-    throw new Error(`Failed to create upload session: ${message}`)
-  }
-
-  const session = (await createResponse.json()) as { uploadUrl: string }
-
-  return uploadChunks(session.uploadUrl, buffer, 0)
-}
-
-async function uploadChunks(uploadUrl: string, buffer: Buffer, offset: number): Promise<DriveItemResponse> {
-  const totalSize = buffer.length
-  if (offset >= totalSize) {
-    throw new Error("Upload completed but no DriveItem response received")
-  }
-
-  const end = Math.min(offset + CHUNK_SIZE, totalSize)
-  const chunk = buffer.subarray(offset, end)
-
-  const chunkResponse = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: {
-      "Content-Length": String(chunk.length),
-      "Content-Range": `bytes ${offset}-${end - 1}/${totalSize}`,
-    },
-    body: new Uint8Array(chunk),
-  })
-
-  if (!chunkResponse.ok) {
-    // Cancel the upload session on failure
-    await fetch(uploadUrl, { method: "DELETE" }).catch(() => {})
-    const message = await parseGraphError(chunkResponse)
-    throw new Error(`Upload chunk failed at byte ${offset}: ${message}`)
-  }
-
-  // The final chunk returns the DriveItem; intermediate chunks return 202
-  if (chunkResponse.status === 200 || chunkResponse.status === 201) {
-    return (await chunkResponse.json()) as DriveItemResponse
-  }
-
-  return uploadChunks(uploadUrl, buffer, offset + CHUNK_SIZE)
 }
 
 export async function runServer(): Promise<void> {

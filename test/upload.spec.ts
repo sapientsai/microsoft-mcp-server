@@ -1,13 +1,10 @@
 import { describe, expect, it } from "vitest"
 import { z } from "zod"
 
-import {
-  decodeBase64Upload,
-  filenameFromPath,
-  filenameFromUrl,
-  parseGraphError,
-  resolveUploadContentType,
-} from "../src/index.js"
+import { filenameFromPath, filenameFromUrl } from "../src/download/download.js"
+import { resolveUploadContentType } from "../src/download/extract.js"
+import { parseGraphError } from "../src/graph/client.js"
+import { decodeBase64Upload } from "../src/upload/upload.js"
 
 /**
  * The get_upload_config parameter schema — mirrors src/index.ts.
@@ -162,15 +159,19 @@ describe("upload", () => {
 
   describe("filename extraction", () => {
     it("should extract filename from Graph API colon path", () => {
-      expect(filenameFromPath("/drives/driveId/root:/folder/report.pdf:/content")).toBe("report.pdf")
+      const result = filenameFromPath("/drives/driveId/root:/folder/report.pdf:/content")
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("report.pdf")
     })
 
     it("should extract filename from nested path", () => {
-      expect(filenameFromPath("/me/drive/root:/Documents/Sub/file.docx:/content")).toBe("file.docx")
+      const result = filenameFromPath("/me/drive/root:/Documents/Sub/file.docx:/content")
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("file.docx")
     })
 
-    it("should return undefined for item ID paths", () => {
-      expect(filenameFromPath("/me/drive/items/itemId/content")).toBeUndefined()
+    it("should return None for item ID paths", () => {
+      expect(filenameFromPath("/me/drive/items/itemId/content").isNone()).toBe(true)
     })
   })
 
@@ -194,27 +195,35 @@ describe("upload", () => {
 
   describe("filenameFromUrl", () => {
     it("should extract filename from URL path", () => {
-      expect(filenameFromUrl("https://example.com/files/report.pdf")).toBe("report.pdf")
+      const result = filenameFromUrl("https://example.com/files/report.pdf")
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("report.pdf")
     })
 
     it("should extract filename from URL with query string", () => {
-      expect(filenameFromUrl("https://example.com/files/doc.docx?token=abc")).toBe("doc.docx")
+      const result = filenameFromUrl("https://example.com/files/doc.docx?token=abc")
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("doc.docx")
     })
 
     it("should decode URL-encoded filenames", () => {
-      expect(filenameFromUrl("https://example.com/files/my%20report.pdf")).toBe("my report.pdf")
+      const result = filenameFromUrl("https://example.com/files/my%20report.pdf")
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("my report.pdf")
     })
 
-    it("should return undefined for root-only URLs", () => {
-      expect(filenameFromUrl("https://example.com/")).toBeUndefined()
+    it("should return None for root-only URLs", () => {
+      expect(filenameFromUrl("https://example.com/").isNone()).toBe(true)
     })
 
-    it("should return undefined for invalid URLs", () => {
-      expect(filenameFromUrl("not-a-url")).toBeUndefined()
+    it("should return None for invalid URLs", () => {
+      expect(filenameFromUrl("not-a-url").isNone()).toBe(true)
     })
 
     it("should handle deeply nested paths", () => {
-      expect(filenameFromUrl("https://cdn.example.com/a/b/c/d/file.xlsx")).toBe("file.xlsx")
+      const result = filenameFromUrl("https://cdn.example.com/a/b/c/d/file.xlsx")
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("file.xlsx")
     })
   })
 

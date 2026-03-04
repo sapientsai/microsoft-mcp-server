@@ -11,7 +11,7 @@ import {
   formatBytes,
   isTextContent,
   processDownloadResponse,
-} from "../src/index.js"
+} from "../src/download/download.js"
 
 // Minimal 1x1 red PNG (68 bytes)
 const TINY_PNG = Buffer.from(
@@ -71,45 +71,55 @@ describe("Download Helpers", () => {
   describe("filenameFromHeaders", () => {
     it("should extract filename from Content-Disposition", () => {
       const headers = new Headers({ "content-disposition": 'attachment; filename="report.pdf"' })
-      expect(filenameFromHeaders(headers)).toBe("report.pdf")
+      const result = filenameFromHeaders(headers)
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("report.pdf")
     })
 
     it("should extract filename without quotes", () => {
       const headers = new Headers({ "content-disposition": "attachment; filename=report.pdf" })
-      expect(filenameFromHeaders(headers)).toBe("report.pdf")
+      const result = filenameFromHeaders(headers)
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("report.pdf")
     })
 
     it("should handle UTF-8 encoded filenames", () => {
       const headers = new Headers({ "content-disposition": "attachment; filename*=UTF-8''budget%202024.xlsx" })
-      expect(filenameFromHeaders(headers)).toBe("budget 2024.xlsx")
+      const result = filenameFromHeaders(headers)
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("budget 2024.xlsx")
     })
 
-    it("should return undefined when no Content-Disposition", () => {
+    it("should return None when no Content-Disposition", () => {
       const headers = new Headers({})
-      expect(filenameFromHeaders(headers)).toBeUndefined()
+      expect(filenameFromHeaders(headers).isNone()).toBe(true)
     })
 
-    it("should return undefined for malformed Content-Disposition", () => {
+    it("should return None for malformed Content-Disposition", () => {
       const headers = new Headers({ "content-disposition": "inline" })
-      expect(filenameFromHeaders(headers)).toBeUndefined()
+      expect(filenameFromHeaders(headers).isNone()).toBe(true)
     })
   })
 
   describe("filenameFromPath", () => {
     it("should extract filename from colon-path format", () => {
-      expect(filenameFromPath("/me/drive/root:/Documents/report.pdf:/content")).toBe("report.pdf")
+      const result = filenameFromPath("/me/drive/root:/Documents/report.pdf:/content")
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("report.pdf")
     })
 
     it("should extract filename from nested colon-path", () => {
-      expect(filenameFromPath("/me/drive/root:/Projects/2024/budget.xlsx:/content")).toBe("budget.xlsx")
+      const result = filenameFromPath("/me/drive/root:/Projects/2024/budget.xlsx:/content")
+      expect(result.isSome()).toBe(true)
+      expect(result.orThrow()).toBe("budget.xlsx")
     })
 
-    it("should return undefined for item ID paths", () => {
-      expect(filenameFromPath("/me/drive/items/ABC123/content")).toBeUndefined()
+    it("should return None for item ID paths", () => {
+      expect(filenameFromPath("/me/drive/items/ABC123/content").isNone()).toBe(true)
     })
 
-    it("should return undefined for paths without content suffix", () => {
-      expect(filenameFromPath("/me/drive/root:/Documents/report.pdf")).toBeUndefined()
+    it("should return None for paths without content suffix", () => {
+      expect(filenameFromPath("/me/drive/root:/Documents/report.pdf").isNone()).toBe(true)
     })
   })
 

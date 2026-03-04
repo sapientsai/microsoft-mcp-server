@@ -1,17 +1,19 @@
+import { type Either, Left, Right, Try } from "functype"
+
+import { type AuthError, authError } from "../errors.js"
 import type { AppOnlySession, ServerConfig, TokenResponse } from "./types.js"
 
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000 // 5 minutes before expiry
 
 export type TokenManager = {
-  getToken: () => Promise<string>
-  getSession: () => Promise<AppOnlySession>
+  getToken: () => Promise<Either<AuthError, string>>
+  getSession: () => Promise<Either<AuthError, AppOnlySession>>
 }
 
 export function createTokenManager(config: Readonly<ServerConfig>): TokenManager {
-  // Use closure-based caching with explicit state type
   const state: { session: AppOnlySession | null } = { session: null }
 
-  const fetchToken = async (): Promise<AppOnlySession> => {
+  const fetchToken = async (): Promise<Either<AuthError, AppOnlySession>> => {
     const tokenUrl = `https://login.microsoftonline.com/${config.tenantId}/oauth2/v2.0/token`
 
     const body = new URLSearchParams({
@@ -31,24 +33,20 @@ export function createTokenManager(config: Readonly<ServerConfig>): TokenManager
 
     if (!response.ok) {
       const errorText = await response.text()
-      const errorMessage = (() => {
-        try {
-          const errorJson = JSON.parse(errorText) as { error_description?: string; error?: string }
-          return errorJson.error_description ?? errorJson.error ?? `Token request failed: ${response.status}`
-        } catch {
-          return `Token request failed: ${response.status} - ${errorText}`
-        }
-      })()
-      throw new Error(errorMessage)
+      const errorMessage = Try(() => JSON.parse(errorText) as { error_description?: string; error?: string }).fold(
+        () => `Token request failed: ${response.status} - ${errorText}`,
+        (errorJson) => errorJson.error_description ?? errorJson.error ?? `Token request failed: ${response.status}`,
+      )
+      return Left(authError(errorMessage))
     }
 
     const data = (await response.json()) as TokenResponse
 
-    return {
+    return Right({
       accessToken: data.access_token,
       expiresAt: new Date(Date.now() + data.expires_in * 1000),
-      mode: "clientCredentials",
-    }
+      mode: "clientCredentials" as const,
+    })
   }
 
   const isTokenValid = (session: Readonly<AppOnlySession>): boolean => {
@@ -57,17 +55,19 @@ export function createTokenManager(config: Readonly<ServerConfig>): TokenManager
     return now < expiresAt - TOKEN_REFRESH_BUFFER_MS
   }
 
-  const getSession = async (): Promise<AppOnlySession> => {
+  const getSession = async (): Promise<Either<AuthError, AppOnlySession>> => {
     if (state.session && isTokenValid(state.session)) {
-      return state.session
+      return Right(state.session)
     }
-    state.session = await fetchToken()
-    return state.session
+    const result = await fetchToken()
+    return result.tap((session) => {
+      state.session = session
+    })
   }
 
-  const getToken = async (): Promise<string> => {
-    const session = await getSession()
-    return session.accessToken
+  const getToken = async (): Promise<Either<AuthError, string>> => {
+    const result = await getSession()
+    return result.map((session) => session.accessToken)
   }
 
   return { getToken, getSession }

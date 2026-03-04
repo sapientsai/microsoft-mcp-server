@@ -1,3 +1,3 @@
-import config from "ts-builds/eslint-fp"
+import config from "ts-builds/eslint-functype"
 
 export default [...config]

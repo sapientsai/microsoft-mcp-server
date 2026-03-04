@@ -1,7 +1,7 @@
 import ExcelJS from "exceljs"
 import { describe, expect, it } from "vitest"
 
-import { EXTRACTABLE_TYPES, extractTextFromBuffer } from "../src/index.js"
+import { EXTRACTABLE_TYPES, extractTextFromBuffer } from "../src/download/extract.js"
 
 // Helper to create a minimal valid XLSX buffer with data
 async function createXlsxBuffer(sheets: Record<string, string[][]>): Promise<Buffer> {
@@ -21,28 +21,32 @@ describe("extractTextFromBuffer", () => {
     it("should return plain text content directly", async () => {
       const buffer = Buffer.from("Hello, world!")
       const result = await extractTextFromBuffer(buffer, "text/plain", "notes.txt")
-      expect(result).toBe("Hello, world!")
+      expect(result.isRight()).toBe(true)
+      expect(result.orThrow()).toBe("Hello, world!")
     })
 
     it("should return JSON content directly", async () => {
       const json = JSON.stringify({ name: "Alice" })
       const buffer = Buffer.from(json)
       const result = await extractTextFromBuffer(buffer, "application/json", "data.json")
-      expect(result).toBe(json)
+      expect(result.isRight()).toBe(true)
+      expect(result.orThrow()).toBe(json)
     })
 
     it("should return CSV content directly", async () => {
       const csv = "name,age\nAlice,30\n"
       const buffer = Buffer.from(csv)
       const result = await extractTextFromBuffer(buffer, "text/csv", "data.csv")
-      expect(result).toBe(csv)
+      expect(result.isRight()).toBe(true)
+      expect(result.orThrow()).toBe(csv)
     })
 
     it("should return XML content directly", async () => {
       const xml = "<root><item>test</item></root>"
       const buffer = Buffer.from(xml)
       const result = await extractTextFromBuffer(buffer, "application/xml", "config.xml")
-      expect(result).toBe(xml)
+      expect(result.isRight()).toBe(true)
+      expect(result.orThrow()).toBe(xml)
     })
   })
 
@@ -62,13 +66,15 @@ describe("extractTextFromBuffer", () => {
         "data.xlsx",
       )
 
-      expect(result).toContain("Name")
-      expect(result).toContain("Alice")
-      expect(result).toContain("30")
-      expect(result).toContain("Bob")
-      expect(result).toContain("25")
+      expect(result.isRight()).toBe(true)
+      const text = result.orThrow()
+      expect(text).toContain("Name")
+      expect(text).toContain("Alice")
+      expect(text).toContain("30")
+      expect(text).toContain("Bob")
+      expect(text).toContain("25")
       // Single sheet should not include sheet header
-      expect(result).not.toContain("[Sheet:")
+      expect(text).not.toContain("[Sheet:")
     })
 
     it("should extract text from multi-sheet XLSX with headers", async () => {
@@ -89,10 +95,12 @@ describe("extractTextFromBuffer", () => {
         "data.xlsx",
       )
 
-      expect(result).toContain("[Sheet: People]")
-      expect(result).toContain("Alice")
-      expect(result).toContain("[Sheet: Cities]")
-      expect(result).toContain("Boston")
+      expect(result.isRight()).toBe(true)
+      const text = result.orThrow()
+      expect(text).toContain("[Sheet: People]")
+      expect(text).toContain("Alice")
+      expect(text).toContain("[Sheet: Cities]")
+      expect(text).toContain("Boston")
     })
 
     it("should infer XLSX type from extension when content type is octet-stream", async () => {
@@ -102,32 +110,23 @@ describe("extractTextFromBuffer", () => {
 
       const result = await extractTextFromBuffer(buffer, "application/octet-stream", "report.xlsx")
 
-      expect(result).toContain("Test")
-      expect(result).toContain("Data")
+      expect(result.isRight()).toBe(true)
+      const text = result.orThrow()
+      expect(text).toContain("Test")
+      expect(text).toContain("Data")
     })
   })
 
   describe("DOCX extraction", () => {
-    it("should extract text from DOCX buffer", async () => {
-      // mammoth.extractRawText works with real DOCX files (ZIP with XML)
-      // We'll create a minimal real DOCX using the known minimum structure
-      const { default: mammothLib } = await import("mammoth")
-
-      // Test that mammoth integration works with a simple approach:
-      // Create a buffer that mammoth can parse - we verify the wiring is correct
-      // by checking the function handles the content type dispatch correctly
+    it("should return Left for invalid DOCX buffer", async () => {
       const docxContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-
-      // Use a DOCX file generated from xlsx (they're both ZIP-based)
-      // Instead, let's verify the error case is handled gracefully for invalid DOCX
-      await expect(extractTextFromBuffer(Buffer.from("not a docx"), docxContentType, "test.docx")).rejects.toThrow()
+      const result = await extractTextFromBuffer(Buffer.from("not a docx"), docxContentType, "test.docx")
+      expect(result.isLeft()).toBe(true)
     })
 
     it("should infer DOCX type from extension when content type is octet-stream", async () => {
-      // Verify the content type resolution works for DOCX
-      await expect(
-        extractTextFromBuffer(Buffer.from("not a docx"), "application/octet-stream", "document.docx"),
-      ).rejects.toThrow()
+      const result = await extractTextFromBuffer(Buffer.from("not a docx"), "application/octet-stream", "document.docx")
+      expect(result.isLeft()).toBe(true)
     })
   })
 
@@ -176,9 +175,11 @@ startxref
       const buffer = Buffer.from(pdfContent)
       const result = await extractTextFromBuffer(buffer, "application/pdf", "test.pdf")
 
-      expect(result).toContain("[PDF:")
-      expect(result).toContain("page")
-      expect(result).toContain("Hello PDF")
+      expect(result.isRight()).toBe(true)
+      const text = result.orThrow()
+      expect(text).toContain("[PDF:")
+      expect(text).toContain("page")
+      expect(text).toContain("Hello PDF")
     })
 
     it("should infer PDF type from extension when content type is octet-stream", async () => {
@@ -225,26 +226,37 @@ startxref
       const buffer = Buffer.from(pdfContent)
       const result = await extractTextFromBuffer(buffer, "application/octet-stream", "report.pdf")
 
-      expect(result).toContain("Hello PDF")
+      expect(result.isRight()).toBe(true)
+      expect(result.orThrow()).toContain("Hello PDF")
     })
   })
 
   describe("unsupported content types", () => {
-    it("should throw for unsupported binary content types", async () => {
+    it("should return Left for unsupported binary content types", async () => {
       const buffer = Buffer.from([0x00, 0x01, 0x02])
-      await expect(extractTextFromBuffer(buffer, "application/zip", "archive.zip")).rejects.toThrow(
-        "Unsupported content type",
-      )
+      const result = await extractTextFromBuffer(buffer, "application/zip", "archive.zip")
+      expect(result.isLeft()).toBe(true)
+      result.tapLeft((err) => {
+        expect(err.message).toContain("Unsupported content type")
+      })
     })
 
-    it("should throw for image content types", async () => {
+    it("should return Left for image content types", async () => {
       const buffer = Buffer.from([0xff, 0xd8, 0xff])
-      await expect(extractTextFromBuffer(buffer, "image/jpeg", "photo.jpg")).rejects.toThrow("Unsupported content type")
+      const result = await extractTextFromBuffer(buffer, "image/jpeg", "photo.jpg")
+      expect(result.isLeft()).toBe(true)
+      result.tapLeft((err) => {
+        expect(err.message).toContain("Unsupported content type")
+      })
     })
 
     it("should include supported types in error message", async () => {
       const buffer = Buffer.from([0x00])
-      await expect(extractTextFromBuffer(buffer, "application/zip", "archive.zip")).rejects.toThrow("text/*")
+      const result = await extractTextFromBuffer(buffer, "application/zip", "archive.zip")
+      expect(result.isLeft()).toBe(true)
+      result.tapLeft((err) => {
+        expect(err.message).toContain("text/*")
+      })
     })
   })
 
