@@ -94,16 +94,21 @@ async function searchViaSearchApi(
   accessToken: string,
   args: z.infer<typeof searchParameters>,
   region?: string,
+  defaultSiteUrl?: string,
 ): Promise<Either<GraphError, readonly SearchResult[]>> {
   const fileTypeClause =
     args.fileTypes && args.fileTypes.length > 0
       ? ` (${args.fileTypes.map((ext) => `filetype:${ext}`).join(" OR ")})`
       : ""
 
-  // KQL site: requires a URL, not a composite site ID
-  const siteClause = args.siteId
-    ? await resolveSiteUrl(accessToken, args.siteId).then((r) => r.map((url) => ` site:${url}`))
-    : Right<GraphError, string>("")
+  // KQL site: requires a URL, not a composite site ID.
+  // Use defaultSiteUrl directly when available (no API call needed).
+  // Fall back to resolveSiteUrl() only when an explicit siteId arg is passed.
+  const siteClause = defaultSiteUrl
+    ? Right<GraphError, string>(` site:${defaultSiteUrl}`)
+    : args.siteId
+      ? await resolveSiteUrl(accessToken, args.siteId).then((r) => r.map((url) => ` site:${url}`))
+      : Right<GraphError, string>("")
 
   if (siteClause.isLeft()) return Left(siteClause.value)
   const queryString = `${args.query}${fileTypeClause}${siteClause.orThrow()}`
@@ -255,6 +260,7 @@ export function buildSearchTool(
   siteCache?: SiteCache,
   defaultSiteId?: string,
   searchRegion?: string,
+  defaultSiteUrl?: string,
 ) {
   return {
     name: "sharepoint_search" as const,
@@ -267,12 +273,16 @@ export function buildSearchTool(
 
       const effectiveArgs = defaultSiteId && !args.siteId ? { ...args, siteId: defaultSiteId } : args
 
+      // When defaultSiteUrl is set and no explicit siteId arg, use it directly in KQL (zero API calls).
+      // Otherwise fall back to siteId resolution.
+      const effectiveSiteUrl = defaultSiteUrl && !args.siteId ? defaultSiteUrl : undefined
+
       // Use the Search API (/search/query) when region is available (required for app permissions).
       // Falls back to drive-based search only for client credentials without region configured.
       const resultsEither = searchRegion
-        ? await searchViaSearchApi(accessToken, effectiveArgs, searchRegion)
+        ? await searchViaSearchApi(accessToken, effectiveArgs, searchRegion, effectiveSiteUrl)
         : authMode === "interactive"
-          ? await searchViaSearchApi(accessToken, effectiveArgs)
+          ? await searchViaSearchApi(accessToken, effectiveArgs, undefined, effectiveSiteUrl)
           : await searchClientCredentials(accessToken, effectiveArgs, siteCache!)
 
       const results = resultsEither.fold(throwGraphError, (r) => r)

@@ -447,6 +447,95 @@ describe("SharePoint Search Tool", () => {
     })
   })
 
+  describe("defaultSiteUrl (SITE_URL env var)", () => {
+    it("should use defaultSiteUrl directly in KQL without resolving siteId", async () => {
+      const searchResponse = { value: [{ hitsContainers: [{ hits: [] }] }] }
+
+      vi.mocked(fetch).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(searchResponse),
+      } as Response)
+
+      const tool = buildSearchTool(
+        mockResolveToken,
+        "interactive",
+        undefined,
+        undefined,
+        undefined,
+        "https://example.sharepoint.com/sites/MySite",
+      )
+      await tool.execute({ query: "budget", top: 10 }, { session: {}, log: mockLog } as never)
+
+      // Only one fetch call (the search), no site URL resolution call
+      expect(fetch).toHaveBeenCalledTimes(1)
+      const callBody = JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string) as {
+        requests: Array<{ query: { queryString: string } }>
+      }
+      expect(callBody.requests[0]?.query.queryString).toContain("site:https://example.sharepoint.com/sites/MySite")
+    })
+
+    it("should ignore defaultSiteUrl when explicit siteId arg is passed", async () => {
+      const siteResponse = { webUrl: "https://example.sharepoint.com/sites/ExplicitSite" }
+      const searchResponse = { value: [{ hitsContainers: [{ hits: [] }] }] }
+
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(siteResponse) } as Response)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(searchResponse) } as Response)
+
+      const tool = buildSearchTool(
+        mockResolveToken,
+        "interactive",
+        undefined,
+        undefined,
+        undefined,
+        "https://example.sharepoint.com/sites/DefaultSite",
+      )
+      await tool.execute({ query: "budget", top: 10, siteId: "explicit-site-id" }, {
+        session: {},
+        log: mockLog,
+      } as never)
+
+      // Should resolve explicit siteId, ignoring defaultSiteUrl
+      expect(fetch).toHaveBeenCalledTimes(2)
+      expect(fetch).toHaveBeenCalledWith(
+        "https://graph.microsoft.com/v1.0/sites/explicit-site-id?$select=webUrl",
+        expect.objectContaining({ headers: expect.objectContaining({ Authorization: `Bearer ${mockToken}` }) }),
+      )
+      const callBody = JSON.parse(vi.mocked(fetch).mock.calls[1]![1]!.body as string) as {
+        requests: Array<{ query: { queryString: string } }>
+      }
+      expect(callBody.requests[0]?.query.queryString).toContain(
+        "site:https://example.sharepoint.com/sites/ExplicitSite",
+      )
+    })
+
+    it("should use defaultSiteUrl with search region", async () => {
+      const searchResponse = { value: [{ hitsContainers: [{ hits: [] }] }] }
+
+      vi.mocked(fetch).mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(searchResponse),
+      } as Response)
+
+      const tool = buildSearchTool(
+        mockResolveToken,
+        "clientCredentials",
+        undefined,
+        undefined,
+        "NAM",
+        "https://example.sharepoint.com/sites/MySite",
+      )
+      await tool.execute({ query: "report", top: 10 }, { session: {}, log: mockLog } as never)
+
+      expect(fetch).toHaveBeenCalledTimes(1)
+      const callBody = JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string) as {
+        requests: Array<{ query: { queryString: string }; region?: string }>
+      }
+      expect(callBody.requests[0]?.query.queryString).toContain("site:https://example.sharepoint.com/sites/MySite")
+      expect(callBody.requests[0]?.region).toBe("NAM")
+    })
+  })
+
   describe("Search region", () => {
     it("should include region in search request body when provided", async () => {
       const searchResponse = { value: [{ hitsContainers: [{ hits: [] }] }] }

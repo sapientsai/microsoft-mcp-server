@@ -17,6 +17,7 @@ export type ServerConfig = {
   aiSearchVectorFields?: string
   aiSearchSelectFields?: string
   siteId?: string
+  siteUrl?: string
   searchRegion?: string
 }
 

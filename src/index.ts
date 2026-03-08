@@ -131,6 +131,7 @@ export function createConfig(): Readonly<ServerConfig> {
     aiSearchVectorFields: process.env.AZURE_AI_SEARCH_VECTOR_FIELDS ?? undefined,
     aiSearchSelectFields: process.env.AZURE_AI_SEARCH_SELECT_FIELDS ?? undefined,
     siteId: process.env.SITE_ID ?? undefined,
+    siteUrl: process.env.SITE_URL ?? undefined,
     searchRegion: process.env.GRAPH_SEARCH_REGION ?? undefined,
   }
 
@@ -607,6 +608,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
       siteCache,
       config.siteId,
       config.authMode === "clientCredentials" ? (config.searchRegion ?? "NAM") : config.searchRegion,
+      config.siteUrl,
     ),
   )
 
