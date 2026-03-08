@@ -80,9 +80,10 @@ function mapHitToResult(hit: SearchHit): SearchResult {
   }
 }
 
-async function searchInteractive(
+async function searchViaSearchApi(
   accessToken: string,
   args: z.infer<typeof searchParameters>,
+  region?: string,
 ): Promise<Either<GraphError, readonly SearchResult[]>> {
   const fileTypeClause =
     args.fileTypes && args.fileTypes.length > 0
@@ -91,16 +92,18 @@ async function searchInteractive(
   const siteClause = args.siteId ? ` site:${args.siteId}` : ""
   const queryString = `${args.query}${fileTypeClause}${siteClause}`
 
-  const body = {
-    requests: [
-      {
-        entityTypes: ["driveItem"],
-        query: { queryString },
-        from: 0,
-        size: args.top,
-      },
-    ],
+  const request: Record<string, unknown> = {
+    entityTypes: ["driveItem"],
+    query: { queryString },
+    from: 0,
+    size: args.top,
   }
+
+  if (region) {
+    request.region = region
+  }
+
+  const body = { requests: [request] }
 
   const result = await graphFetch(`${GRAPH_BASE_URL}/v1.0/search/query`, accessToken, {
     method: "POST",
@@ -226,10 +229,16 @@ function filterAndSort(
     .toArray()
 }
 
+function throwGraphError(err: GraphError): never {
+  throw new Error(`${err.code}: ${err.message} (HTTP ${err.status})`)
+}
+
 export function buildSearchTool(
   resolveAccessToken: (session: unknown) => Promise<string>,
   authMode: AuthMode,
   siteCache?: SiteCache,
+  defaultSiteId?: string,
+  searchRegion?: string,
 ) {
   return {
     name: "sharepoint_search" as const,
@@ -240,12 +249,17 @@ export function buildSearchTool(
       const accessToken = await resolveAccessToken(context.session)
       context.log.info("SharePoint search", { query: args.query, mode: authMode, siteId: args.siteId })
 
-      const resultsEither =
-        authMode === "interactive"
-          ? await searchInteractive(accessToken, args)
-          : await searchClientCredentials(accessToken, args, siteCache!)
+      const effectiveArgs = defaultSiteId && !args.siteId ? { ...args, siteId: defaultSiteId } : args
 
-      const results = resultsEither.orThrow()
+      // Use the Search API (/search/query) when region is available (required for app permissions).
+      // Falls back to drive-based search only for client credentials without region configured.
+      const resultsEither = searchRegion
+        ? await searchViaSearchApi(accessToken, effectiveArgs, searchRegion)
+        : authMode === "interactive"
+          ? await searchViaSearchApi(accessToken, effectiveArgs)
+          : await searchClientCredentials(accessToken, effectiveArgs, siteCache!)
+
+      const results = resultsEither.fold(throwGraphError, (r) => r)
       return JSON.stringify({ results, totalCount: results.length }, null, 2)
     },
   }

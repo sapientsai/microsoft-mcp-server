@@ -130,6 +130,8 @@ export function createConfig(): Readonly<ServerConfig> {
     aiSearchSemanticConfig: process.env.AZURE_AI_SEARCH_SEMANTIC_CONFIG ?? undefined,
     aiSearchVectorFields: process.env.AZURE_AI_SEARCH_VECTOR_FIELDS ?? undefined,
     aiSearchSelectFields: process.env.AZURE_AI_SEARCH_SELECT_FIELDS ?? undefined,
+    siteId: process.env.SITE_ID ?? undefined,
+    searchRegion: process.env.GRAPH_SEARCH_REGION ?? undefined,
   }
 
   validateConfig(config).orThrow()
@@ -599,7 +601,13 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
 
   // SharePoint search tool
   server.addTool(
-    buildSearchTool(async (session) => (await resolveAccessToken(session)).orThrow(), config.authMode, siteCache),
+    buildSearchTool(
+      async (session) => (await resolveAccessToken(session)).orThrow(),
+      config.authMode,
+      siteCache,
+      config.siteId,
+      config.authMode === "clientCredentials" ? (config.searchRegion ?? "NAM") : config.searchRegion,
+    ),
   )
 
   // Azure AI Search tool (optional — only registered when configured)

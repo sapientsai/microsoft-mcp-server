@@ -16,6 +16,8 @@ export type ServerConfig = {
   aiSearchSemanticConfig?: string
   aiSearchVectorFields?: string
   aiSearchSelectFields?: string
+  siteId?: string
+  searchRegion?: string
 }
 
 export type AppOnlySession = {
