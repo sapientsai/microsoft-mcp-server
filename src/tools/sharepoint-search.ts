@@ -80,6 +80,16 @@ function mapHitToResult(hit: SearchHit): SearchResult {
   }
 }
 
+async function resolveSiteUrl(accessToken: string, siteId: string): Promise<Either<GraphError, string>> {
+  const result = await graphFetch(`${GRAPH_BASE_URL}/v1.0/sites/${siteId}?$select=webUrl`, accessToken)
+  if (result.isLeft()) return Left(result.value)
+  const data = (await result.orThrow().json()) as { webUrl?: string }
+  return Option(data.webUrl).match({
+    Some: (url) => Right(url),
+    None: () => Left(graphError("no_site_url", `Site ${siteId} has no webUrl.`, 404)),
+  })
+}
+
 async function searchViaSearchApi(
   accessToken: string,
   args: z.infer<typeof searchParameters>,
@@ -89,8 +99,14 @@ async function searchViaSearchApi(
     args.fileTypes && args.fileTypes.length > 0
       ? ` (${args.fileTypes.map((ext) => `filetype:${ext}`).join(" OR ")})`
       : ""
-  const siteClause = args.siteId ? ` site:${args.siteId}` : ""
-  const queryString = `${args.query}${fileTypeClause}${siteClause}`
+
+  // KQL site: requires a URL, not a composite site ID
+  const siteClause = args.siteId
+    ? await resolveSiteUrl(accessToken, args.siteId).then((r) => r.map((url) => ` site:${url}`))
+    : Right<GraphError, string>("")
+
+  if (siteClause.isLeft()) return Left(siteClause.value)
+  const queryString = `${args.query}${fileTypeClause}${siteClause.orThrow()}`
 
   const request: Record<string, unknown> = {
     entityTypes: ["driveItem"],

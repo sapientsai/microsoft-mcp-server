@@ -84,21 +84,27 @@ describe("SharePoint Search Tool", () => {
       expect(callBody.requests[0]?.query.queryString).toContain("filetype:pdf")
     })
 
-    it("should scope by siteId in query string", async () => {
+    it("should resolve siteId to URL and scope by site in query string", async () => {
+      const siteResponse = { webUrl: "https://example.sharepoint.com/sites/TestSite" }
       const searchResponse = { value: [{ hitsContainers: [{ hits: [] }] }] }
 
-      vi.mocked(fetch).mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(searchResponse),
-      } as Response)
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(siteResponse) } as Response)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(searchResponse) } as Response)
 
       const tool = buildSearchTool(mockResolveToken, "interactive")
       await tool.execute({ query: "budget", top: 10, siteId: "site-123" }, { session: {}, log: mockLog } as never)
 
-      const callBody = JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string) as {
+      // First call resolves site URL
+      expect(fetch).toHaveBeenCalledWith(
+        "https://graph.microsoft.com/v1.0/sites/site-123?$select=webUrl",
+        expect.objectContaining({ headers: expect.objectContaining({ Authorization: `Bearer ${mockToken}` }) }),
+      )
+      // Second call is the search with resolved URL in KQL
+      const callBody = JSON.parse(vi.mocked(fetch).mock.calls[1]![1]!.body as string) as {
         requests: Array<{ query: { queryString: string } }>
       }
-      expect(callBody.requests[0]?.query.queryString).toContain("site:site-123")
+      expect(callBody.requests[0]?.query.queryString).toContain("site:https://example.sharepoint.com/sites/TestSite")
     })
 
     it("should return empty results gracefully", async () => {
@@ -508,21 +514,21 @@ describe("SharePoint Search Tool", () => {
       expect(unusedCache.getSites).not.toHaveBeenCalled()
     })
 
-    it("should include siteId in KQL when using search API with region", async () => {
+    it("should resolve siteId to URL in KQL when using search API with region", async () => {
+      const siteResponse = { webUrl: "https://example.sharepoint.com/sites/TestSite" }
       const searchResponse = { value: [{ hitsContainers: [{ hits: [] }] }] }
 
-      vi.mocked(fetch).mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(searchResponse),
-      } as Response)
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(siteResponse) } as Response)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(searchResponse) } as Response)
 
       const tool = buildSearchTool(mockResolveToken, "clientCredentials", undefined, undefined, "NAM")
       await tool.execute({ query: "budget", top: 10, siteId: "site-abc" }, { session: {}, log: mockLog } as never)
 
-      const callBody = JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string) as {
+      const callBody = JSON.parse(vi.mocked(fetch).mock.calls[1]![1]!.body as string) as {
         requests: Array<{ query: { queryString: string }; region?: string }>
       }
-      expect(callBody.requests[0]?.query.queryString).toContain("site:site-abc")
+      expect(callBody.requests[0]?.query.queryString).toContain("site:https://example.sharepoint.com/sites/TestSite")
       expect(callBody.requests[0]?.region).toBe("NAM")
     })
 
