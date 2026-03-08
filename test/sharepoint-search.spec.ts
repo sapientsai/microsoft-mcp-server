@@ -129,7 +129,8 @@ describe("SharePoint Search Tool", () => {
       invalidate: vi.fn(),
     }
 
-    it("should search a single site by siteId", async () => {
+    it("should search a single site by siteId without calling getSites", async () => {
+      const driveResponse = { id: "drive-1" }
       const driveSearchResponse = {
         value: [
           {
@@ -144,10 +145,9 @@ describe("SharePoint Search Tool", () => {
         ],
       }
 
-      vi.mocked(fetch).mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(driveSearchResponse),
-      } as Response)
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(driveResponse) } as Response)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(driveSearchResponse) } as Response)
 
       const tool = buildSearchTool(mockResolveToken, "clientCredentials", mockSiteCache)
       const result = await tool.execute({ query: "report", top: 10, siteId: "site-1" }, {
@@ -158,7 +158,44 @@ describe("SharePoint Search Tool", () => {
 
       expect(parsed.results).toHaveLength(1)
       expect(parsed.results[0]?.name).toBe("report.pdf")
-      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(fetch).toHaveBeenCalledTimes(2)
+      expect(fetch).toHaveBeenCalledWith(
+        "https://graph.microsoft.com/v1.0/sites/site-1/drive",
+        expect.objectContaining({ headers: expect.objectContaining({ Authorization: `Bearer ${mockToken}` }) }),
+      )
+      expect(mockSiteCache.getSites).not.toHaveBeenCalled()
+    })
+
+    it("should propagate error when siteId drive resolution fails", async () => {
+      vi.mocked(fetch).mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        json: () => Promise.resolve({ error: { code: "AccessDenied", message: "Insufficient privileges" } }),
+      } as Response)
+
+      const tool = buildSearchTool(mockResolveToken, "clientCredentials", mockSiteCache)
+      await expect(
+        tool.execute({ query: "report", top: 10, siteId: "site-1" }, { session: {}, log: mockLog } as never),
+      ).rejects.toThrow()
+      expect(mockSiteCache.getSites).not.toHaveBeenCalled()
+    })
+
+    it("should propagate error when searchDrive fails for single-site search", async () => {
+      const driveResponse = { id: "drive-1" }
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(driveResponse) } as Response)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          statusText: "Internal Server Error",
+          json: () => Promise.resolve({ error: { code: "ServerError", message: "Something went wrong" } }),
+        } as Response)
+
+      const tool = buildSearchTool(mockResolveToken, "clientCredentials", mockSiteCache)
+      await expect(
+        tool.execute({ query: "report", top: 10, siteId: "site-1" }, { session: {}, log: mockLog } as never),
+      ).rejects.toThrow()
     })
 
     it("should fan-out across all cached sites", async () => {
@@ -200,6 +237,7 @@ describe("SharePoint Search Tool", () => {
     })
 
     it("should return partial results when some sites fail", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
       const driveSearchResponse = {
         value: [
           {
@@ -227,6 +265,8 @@ describe("SharePoint Search Tool", () => {
 
       expect(parsed.results).toHaveLength(1)
       expect(parsed.results[0]?.name).toBe("doc.docx")
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[sharepoint-search] Site search failed"))
+      warnSpy.mockRestore()
     })
 
     it("should post-filter by file extension", async () => {

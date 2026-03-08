@@ -127,7 +127,7 @@ async function searchDrive(
     accessToken,
   )
 
-  if (result.isLeft()) return Right([] as readonly SearchResult[]) // Graceful fallback for individual drive failures
+  if (result.isLeft()) return Left(result.value)
 
   const data = (await result.orThrow().json()) as DriveSearchResponse
   const items = data.value ?? []
@@ -151,22 +151,28 @@ async function searchDrive(
   return Right(results as readonly SearchResult[])
 }
 
+async function resolveDriveForSite(accessToken: string, siteId: string): Promise<Either<GraphError, string>> {
+  const result = await graphFetch(`${GRAPH_BASE_URL}/v1.0/sites/${siteId}/drive`, accessToken)
+  if (result.isLeft()) return Left(result.value)
+  const data = (await result.orThrow().json()) as { id?: string }
+  return Option(data.id).match({
+    Some: (id) => Right(id),
+    None: () => Left(graphError("no_drive", `Site ${siteId} has no default drive.`, 404)),
+  })
+}
+
 async function searchClientCredentials(
   accessToken: string,
   args: z.infer<typeof searchParameters>,
   siteCache: SiteCache,
 ): Promise<Either<GraphError, readonly SearchResult[]>> {
-  // Single site search
+  // Single site search — resolve drive directly, no getAllSites needed
   if (args.siteId) {
-    const sitesResult = await siteCache.getSites(accessToken)
-    if (sitesResult.isLeft()) return Left(sitesResult.value)
-
-    const sites = sitesResult.orThrow()
-    const site = sites.find((s) => s.id === args.siteId)
-    if (!site) {
-      return Left(graphError("site_not_found", `Site ${args.siteId} not found or not accessible.`, 404))
-    }
-    const results = await searchDrive(accessToken, site.driveId, site.id, args.query)
+    const driveResult = await resolveDriveForSite(accessToken, args.siteId)
+    if (driveResult.isLeft()) return Left(driveResult.value)
+    const driveId = driveResult.orThrow()
+    const results = await searchDrive(accessToken, driveId, args.siteId, args.query)
+    if (results.isLeft()) return Left(results.value)
     return results.map((r) => filterAndSort(r, args))
   }
 
