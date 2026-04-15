@@ -13,7 +13,7 @@ import type { SiteCache } from "./cache/site-cache.js"
 import { createSiteCache } from "./cache/site-cache.js"
 import { filenameFromHeaders, filenameFromPath, formatBytes, processDownloadResponse } from "./download/download.js"
 import { extractTextFromBuffer, resolveUploadContentType } from "./download/extract.js"
-import { type AuthError, authError, type ConfigError, configError } from "./errors.js"
+import { type AuthError, authError, type ConfigError, configError, type GraphError } from "./errors.js"
 import { AZURE_BASE_URL, GRAPH_BASE_URL } from "./graph/client.js"
 import type { AiSearchConfig } from "./search/ai-search-client.js"
 import { buildAiSearchTool } from "./tools/ai-search.js"
@@ -664,7 +664,7 @@ The get_upload_config tool also returns ready-to-run curl commands with authenti
     const contentType = resolveUploadContentType(explicitContentType, filename)
     const apiBase = `${GRAPH_BASE_URL}/${apiVersion}`
 
-    const uploadResult: Either<{ message: string }, DriveItemResponse> =
+    const uploadResult: Either<GraphError, DriveItemResponse> =
       buffer.length <= SIMPLE_UPLOAD_LIMIT
         ? await simpleUpload(apiBase, path, accessToken, buffer, contentType, conflictBehavior)
         : await sessionUpload(apiBase, path, accessToken, buffer, conflictBehavior)
