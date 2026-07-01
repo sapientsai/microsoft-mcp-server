@@ -1,4 +1,15 @@
-# Microsoft Graph MCP Server
+# Microsoft Graph MCP Server (archived)
+
+> **⚠️ This repository is archived and no longer maintained.**
+>
+> Work has moved to the [`sapientsai/microsoft365-mcp-server`](https://github.com/sapientsai/microsoft365-mcp-server) monorepo, which splits this server into two focused packages:
+>
+> - **[`packages/microsoft365`](https://github.com/sapientsai/microsoft365-mcp-server/tree/main/packages/microsoft365)** — the successor to this repo. Delegated (OAuth-proxy) MS365 gateway covering Outlook, Files, Teams, Calendar, and more. Published as [`microsoft365-mcp-server`](https://www.npmjs.com/package/microsoft365-mcp-server) on npm.
+> - **[`packages/graph`](https://github.com/sapientsai/microsoft365-mcp-server/tree/main/packages/graph)** — new app-only (`client_credentials`) variant purpose-built for headless document-RAG deployments (`microsoft_graph` passthrough + `read_document` + `sharepoint_search` + `/upload` relay). Ships as a Docker image at `ghcr.io/sapientsai/ms-graph-server`.
+>
+> Existing releases of `microsoft-mcp-server` on npm remain available for reference but will not receive further updates. New work should target the monorepo.
+
+---
 
 A Model Context Protocol (MCP) server that provides access to Microsoft Graph API, enabling AI assistants to interact with Microsoft 365 services including users, mail, calendar, files, and more.
 
